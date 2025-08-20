@@ -83,20 +83,20 @@ class Lumina2Model(pl.LightningModule):
         if self.config.model.get("text_encoder_path", None):
             self.text_encoder = AutoModel.from_pretrained(
                 self.config.model.text_encoder_path,
-                torch_dtype=torch.float16
+                torch_dtype=torch.float32
             ).cuda()
         else:
             self.text_encoder = AutoModel.from_pretrained(
                 self.model_path,
                 subfolder="text_encoder",
-                torch_dtype=torch.float16
+                torch_dtype=torch.float32
             ).cuda()
 
         logger.info(f"text encoder: {type(self.text_encoder)}")
         self.cap_feat_dim = self.text_encoder.config.hidden_size
 
         # Create model:
-        self.model = Lumina_2b().to(dtype=torch.float16)
+        self.model = Lumina_2b().to(dtype=torch.float32)
         logger.info(f"DiT Parameters: {self.model.parameter_count():,}")
         self.model_patch_size = self.model.patch_size
 
@@ -217,13 +217,13 @@ class Lumina2Model(pl.LightningModule):
         if self.config.model.get("vae_path", None):
             self.vae = AutoencoderKL.from_pretrained(
                 self.config.model.vae_path,
-                torch_dtype=torch.float16
+                torch_dtype=torch.float32
             )
         else:
             self.vae = AutoencoderKL.from_pretrained(
                 self.model_path,
                 subfolder="vae",
-                torch_dtype=torch.float16
+                torch_dtype=torch.float32
             )
 
         if advanced.get("latents_mean", None):
@@ -317,7 +317,7 @@ class Lumina2Model(pl.LightningModule):
         x = [img.to(self.target_device, non_blocking=True) for img in images]
 
         for i, img in enumerate(x):
-            x[i] = (self.vae.encode(img[None].float16()).latent_dist.mode()[0] - vae_shift) * vae_scale
+            x[i] = (self.vae.encode(img[None].to(torch.float32)).latent_dist.mode()[0] - vae_shift) * vae_scale
             x[i] = x[i].float()
 
         return x

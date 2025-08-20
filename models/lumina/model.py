@@ -867,14 +867,14 @@ def Lumina_2b(**kwargs):
     return Lumina(
         patch_size=2,
         in_channels=16,
-        dim=2304,
-        n_layers=26,
-        n_heads=24,
-        n_kv_heads=8,
+        dim=768,
+        n_layers=12,
+        n_heads=8,
+        n_kv_heads=4,
         axes_dims=[32, 32, 32],
         axes_lens=[300, 512, 512],
         qk_norm=True,
-        cap_feat_dim=2304,
+        cap_feat_dim=640,
         **kwargs,
     )
 def count_parameters(model):
