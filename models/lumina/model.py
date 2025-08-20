@@ -813,6 +813,11 @@ class Lumina(nn.Module):
 
         return x
 
+    def parameter_count(self, trainable_only=True):
+        if trainable_only:
+            return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return sum(p.numel() for p in self.parameters())
+
 
 def Lumina_2b(**kwargs):
     return Lumina(

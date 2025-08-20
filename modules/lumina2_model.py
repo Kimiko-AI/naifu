@@ -26,11 +26,10 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     apply_activation_checkpointing,
     checkpoint_wrapper,
 )
-from models.lumina import models
+from models.lumina import Lumina_2b
 from models.lumina.transport import create_transport, Sampler
 from lightning.pytorch.utilities import rank_zero_only
 from safetensors.torch import save_file
-from modules.config_sdxl_base import model_config
 from diffusers.training_utils import EMAModel
 from diffusers import (
     AutoencoderKL,

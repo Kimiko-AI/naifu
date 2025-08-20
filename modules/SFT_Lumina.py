@@ -2,20 +2,13 @@ import safetensors
 import torch
 import os
 import lightning as pl
-import torch.nn.functional as F
 from omegaconf import OmegaConf
 from common.utils import get_class, get_latest_checkpoint, load_torch_file
 from common.logging import logger
 from lightning.pytorch.utilities.model_summary import ModelSummary
 from torch.utils.data import DataLoader
-from IndexKits.index_kits.sampler import DistributedSamplerWithStartIndex, BlockDistributedSampler
-from data_loader.arrow2_load_stream_ import TextImageArrowStream
-
 from modules.lumina2_model import Lumina2Model
 from models.lumina.transport import create_transport
-
-import random
-import math
 
 
 def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
