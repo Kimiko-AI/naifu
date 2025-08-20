@@ -69,6 +69,9 @@ def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
 
 
 class SupervisedFineTune(Lumina2Model):
+    def __init__(self, model_path, config, device):
+        super().__init__(model_path, config, device)
+        self.batch_size = config.trainer.batch_size
     def get_module(self):
         return self.model
 

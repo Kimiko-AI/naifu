@@ -1,3 +1,10 @@
+target: modules.SFT_Lumina.setup
+adaptive_loss_weight: True
+name: test-run
+
+lightning:
+  precision: "16-mixed"
+
 trainer:
   model_path: ""
   resolution: 256
@@ -7,6 +14,23 @@ trainer:
   grad_clip: 1.0
   max_steps: 10000
   seed: 42
+  wandb_id: "Lumina_test"
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  checkpoint_steps: 1000
+  checkpoint_freq: 1
+  save_weights_only: false
+  max_epochs: -1
+  auto_resume: false
+
+
+model:
+  vae_path: "Shio-Koube/VAE-2"
+  tokenizer_path: "unsloth/gemma-3-270m-it"
+  text_encoder_path: "unsloth/gemma-3-270m-it"
+
+
+
 
 dataset:
   name: "data.gradient.GradientDataset"
@@ -27,5 +51,16 @@ scheduler:
 
 advanced:
   train_text_encoder: False
-  snr_type: "log-logistic"
-  no_shift: False
+  snr_type: "lognorm"
+  no_shift: true
+  use_ema: true
+
+
+sampling:
+  enabled: False
+  every_n_steps: 1000
+  every_n_epochs: 1
+  prompts:
+    - "a gradient from black to white"
+  save_dir: "samples/lumina_gradient"
+  seed: 42

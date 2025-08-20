@@ -71,7 +71,6 @@ class Lumina2Model(pl.LightningModule):
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.config.model.tokenizer_path,
                 use_fast=False,
-                local_files_only=True
             )
         else:
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -101,11 +100,7 @@ class Lumina2Model(pl.LightningModule):
         self.cap_feat_dim = self.text_encoder.config.hidden_size
 
         # Create model:
-        self.model = models.__dict__[self.config.model.model_name](
-            in_channels=16,
-            qk_norm=self.config.model.get("qk_norm", True),
-            cap_feat_dim=self.cap_feat_dim,
-        ).to(dtype=torch.float16)
+        self.model = Lumina_2b().to(dtype=torch.float16)
         logger.info(f"DiT Parameters: {self.model.parameter_count():,}")
         self.model_patch_size = self.model.patch_size
 
@@ -226,7 +221,7 @@ class Lumina2Model(pl.LightningModule):
         if self.config.model.get("vae_path", None):
             self.vae = AutoencoderKL.from_pretrained(
                 self.config.model.vae_path,
-                torch_dtype=torch.bfloat16
+                torch_dtype=torch.float16
             )
         else:
             self.vae = AutoencoderKL.from_pretrained(

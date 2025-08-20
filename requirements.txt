@@ -12,7 +12,7 @@ torchvision
 requests
 timm
 safetensors
-
+torchdiffeq
 h5py
 open-clip-torch==2.24.0
 einops
