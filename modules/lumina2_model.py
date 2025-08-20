@@ -76,7 +76,6 @@ class Lumina2Model(pl.LightningModule):
                 self.model_path,
                 subfolder="tokenizer",
                 use_fast=False,
-                local_files_only=True
             )
         self.tokenizer.padding_side = "right"
 
@@ -84,15 +83,13 @@ class Lumina2Model(pl.LightningModule):
         if self.config.model.get("text_encoder_path", None):
             self.text_encoder = AutoModel.from_pretrained(
                 self.config.model.text_encoder_path,
-                local_files_only=True,
-                torch_dtype=torch.bfloat16
+                torch_dtype=torch.float16
             ).cuda()
         else:
             self.text_encoder = AutoModel.from_pretrained(
                 self.model_path,
                 subfolder="text_encoder",
-                local_files_only=True,
-                torch_dtype=torch.bfloat16
+                torch_dtype=torch.float16
             ).cuda()
 
         logger.info(f"text encoder: {type(self.text_encoder)}")
@@ -226,7 +223,7 @@ class Lumina2Model(pl.LightningModule):
             self.vae = AutoencoderKL.from_pretrained(
                 self.model_path,
                 subfolder="vae",
-                torch_dtype=torch.bfloat16
+                torch_dtype=torch.float16
             )
 
         if advanced.get("latents_mean", None):
@@ -320,7 +317,7 @@ class Lumina2Model(pl.LightningModule):
         x = [img.to(self.target_device, non_blocking=True) for img in images]
 
         for i, img in enumerate(x):
-            x[i] = (self.vae.encode(img[None].bfloat16()).latent_dist.mode()[0] - vae_shift) * vae_scale
+            x[i] = (self.vae.encode(img[None].float16()).latent_dist.mode()[0] - vae_shift) * vae_scale
             x[i] = x[i].float()
 
         return x
