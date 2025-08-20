@@ -1,0 +1,31 @@
+trainer:
+  model_path: ""
+  resolution: 256
+  batch_size: 1
+  checkpoint_dir: "checkpoints/lumina_gradient"
+  save_every: 1000
+  grad_clip: 1.0
+  max_steps: 10000
+  seed: 42
+
+dataset:
+  name: "data.gradient.GradientDataset"
+  width: 256
+  height: 256
+  num_batches: 100
+
+optimizer:
+  name: "torch.optim.AdamW"
+  params:
+    lr: 1.0e-5
+    weight_decay: 0.01
+
+scheduler:
+  name: "torch.optim.lr_scheduler.CosineAnnealingLR"
+  params:
+    T_max: 10000
+
+advanced:
+  train_text_encoder: False
+  snr_type: "log-logistic"
+  no_shift: False

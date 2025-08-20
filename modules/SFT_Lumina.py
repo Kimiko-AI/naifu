@@ -26,29 +26,9 @@ def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
         device=fabric.device
     )
 
-    world_size = fabric.world_size
-    logger.info(f"loading dataset from {config.dataset.index_file}")
-    dataset = TextImageArrowStream(args="args",
-                                   resolution=config.trainer.resolution,
-                                   random_flip=config.dataset.random_flip,
-                                   log_fn=logger.info,
-                                   index_file=config.dataset.index_file,
-                                   multireso=config.dataset.multireso,
-                                   batch_size=config.trainer.batch_size,
-                                   world_size=world_size
-                                   )
-
-    if config.dataset.multireso:
-        sampler = BlockDistributedSampler(dataset, num_replicas=world_size, rank=fabric.global_rank,
-                                          seed=config.trainer.seed,
-                                          shuffle=True, drop_last=True, batch_size=config.trainer.batch_size)
-    else:
-        sampler = DistributedSamplerWithStartIndex(dataset, num_replicas=world_size, rank=fabric.global_rank,
-                                                   seed=config.trainer.seed,
-                                                   shuffle=True, drop_last=True)
-
-    dataloader = DataLoader(dataset, batch_size=config.trainer.batch_size, shuffle=False, sampler=sampler,
-                            num_workers=config.dataset.num_workers, pin_memory=True, drop_last=True)
+    dataset_class = get_class(config.dataset.name)
+    dataset = dataset_class(**config.dataset)
+    dataloader = dataset.init_dataloader()
 
     params_to_optim = [{"params": model.parameters()}]
     if config.advanced.get("train_text_encoder"):
