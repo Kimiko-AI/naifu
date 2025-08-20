@@ -813,6 +813,50 @@ class Lumina(nn.Module):
 
         return x
 
+    def forward_with_cfg(
+            self,
+            x,
+            t,
+            cap_feats,
+            cap_mask,
+            cfg_scale,
+            cfg_trunc=100,
+            renorm_cfg=1
+    ):
+
+        """
+        Forward pass of NextDiT, but also batches the unconditional forward pass
+        for classifier-free guidance.
+        """
+        # # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
+        half = x[: len(x) // 2]
+        if t[0] < cfg_trunc:
+            combined = torch.cat([half, half], dim=0) # [2, 16, 128, 128]
+            model_out = self.forward(combined, t, cap_feats, cap_mask) # [2, 16, 128, 128]
+            # For exact reproducibility reasons, we apply classifier-free guidance on only
+            # three channels by default. The standard approach to cfg applies it to all channels.
+            # This can be done by uncommenting the following line and commenting-out the line following that.
+            eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
+            cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
+            half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+            if float(renorm_cfg) > 0.0:
+                ori_pos_norm = torch.linalg.vector_norm(cond_eps
+                        , dim=tuple(range(1, len(cond_eps.shape))), keepdim=True
+                )
+                max_new_norm = ori_pos_norm * float(renorm_cfg)
+                new_pos_norm = torch.linalg.vector_norm(
+                        half_eps, dim=tuple(range(1, len(half_eps.shape))), keepdim=True
+                    )
+                if new_pos_norm >= max_new_norm:
+                    half_eps = half_eps * (max_new_norm / new_pos_norm)
+        else:
+            combined = half
+            model_out = self.forward(combined, t[:len(x) // 2], cap_feats[:len(x) // 2], cap_mask[:len(x) // 2])
+            eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
+            half_eps = eps
+
+        output = torch.cat([half_eps, half_eps], dim=0)
+        return output
     def parameter_count(self, trainable_only=True):
         if trainable_only:
             return sum(p.numel() for p in self.parameters() if p.requires_grad)
