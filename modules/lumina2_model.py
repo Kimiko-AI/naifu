@@ -287,7 +287,10 @@ class Lumina2Model(pl.LightningModule):
             input_ids=text_input_ids,
             attention_mask=prompt_masks,
             output_hidden_states=True,
-        ).hidden_states[-2]
+        ).hidden_states
+        prompt_embeds = torch.stack(prompt_embeds, dim=0)
+        prompt_embeds = F.normalize(prompt_embeds, p=2, dim=-1).mean(dim=0)
+
 
         # 确保 prompt_embeds 的类型与 x_embedder 的 Linear 层匹配
         prompt_embeds = prompt_embeds.to(dtype=self.model.x_embedder.weight.dtype)

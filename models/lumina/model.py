@@ -6,6 +6,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
 
+def random_mask_tokens(mask: torch.Tensor, drop_ratio=0.5):
+    B, N = mask.shape
+    new_mask = mask.clone()
+    for b in range(B):
+        active_idx = torch.nonzero(mask[b], as_tuple=False).squeeze(1)
+        if active_idx.numel() == 0:
+            continue
+        drop_count = int(drop_ratio * active_idx.numel())
+        drop_idx = torch.randperm(active_idx.numel(), device=mask.device)[:drop_count]
+        new_mask[b, active_idx[drop_idx]] = False
+    return new_mask
+
+class DynamicTanh(nn.Module):
+    def __init__(self, normalized_shape, channels_last = True, alpha_init_value=0.5, eps = 1e-4):
+        super().__init__()
+        self.normalized_shape = normalized_shape
+        self.alpha_init_value = alpha_init_value
+        self.channels_last = channels_last
+
+        self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.bias = nn.Parameter(torch.zeros(normalized_shape))
+
+    def forward(self, x):
+        x = torch.tanh(self.alpha * x)
+        if self.channels_last:
+            x = x * self.weight + self.bias
+        else:
+            x = x * self.weight[:, None, None] + self.bias[:, None, None]
+        return x
+
+    def extra_repr(self):
+        return f"normalized_shape={self.normalized_shape}, alpha_init_value={self.alpha_init_value}, channels_last={self.channels_last}"
+
 
 def modulate(x, scale):
     return x * (1 + scale.unsqueeze(1))
@@ -103,15 +137,6 @@ def apply_rotary_emb(
         return x_out.type_as(x_in)
 
 
-class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        return F.rms_norm(x, self.weight.shape, weight=self.weight, eps=self.eps)
-
 
 class TimestepEmbedder(nn.Module):
     """
@@ -187,8 +212,8 @@ class JointAttention(nn.Module):
         nn.init.xavier_uniform_(self.out.weight)
 
         if qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
+            self.q_norm = DynamicTanh(self.head_dim)
+            self.k_norm = DynamicTanh(self.head_dim)
         else:
             self.q_norm = self.k_norm = nn.Identity()
 
@@ -254,54 +279,41 @@ class FeedForward(nn.Module):
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
     ):
-        """
-        Initialize the FeedForward module.
-
-        Args:
-            dim (int): Input dimension.
-            hidden_dim (int): Hidden dimension of the feedforward layer.
-            multiple_of (int): Value to ensure hidden dimension is a multiple
-                of this value.
-            ffn_dim_multiplier (float, optional): Custom multiplier for hidden
-                dimension. Defaults to None.
-
-        """
         super().__init__()
-        # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(
-            dim,
-            hidden_dim,
-            bias=False,
-        )
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         nn.init.xavier_uniform_(self.w1.weight)
-        self.w2 = nn.Linear(
-            hidden_dim,
-            dim,
-            bias=False,
-        )
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
         nn.init.xavier_uniform_(self.w2.weight)
-        self.w3 = nn.Linear(
-            dim,
-            hidden_dim,
-            bias=False,
-        )
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
         nn.init.xavier_uniform_(self.w3.weight)
-        self.use_compiled = False
 
     def _forward_silu_gating(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-    def forward(self, x):
-        # disabled for now
-        # https://github.com/pytorch/pytorch/issues/128035
-        # if self.use_compiled:
-        #     return torch.compile(self._forward_silu_gating)(x)
-        # else:
-        return self._forward_silu_gating(x)
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+        """
+        x: [B, N, D]
+        mask: [B, N] boolean. True = unmasked (compute), False = masked (copy input)
+        """
+        if mask is None:
+            return self._forward_silu_gating(x)
+
+        # prepare output
+        out = x.clone()
+
+        # compute only on unmasked tokens
+        mask_exp = mask.unsqueeze(-1).expand_as(x)  # [B, N, D]
+        if mask.any():
+            x_unmasked = x[mask]  # [num_unmasked, D]
+            out_unmasked = self._forward_silu_gating(x_unmasked)
+            out[mask] = out_unmasked
+        return out
+
+
 
 
 class JointTransformerBlock(nn.Module):
@@ -343,11 +355,11 @@ class JointTransformerBlock(nn.Module):
             ffn_dim_multiplier=ffn_dim_multiplier,
         )
         self.layer_id = layer_id
-        self.attention_norm1 = RMSNorm(dim, eps=norm_eps)
-        self.ffn_norm1 = RMSNorm(dim, eps=norm_eps)
+        self.attention_norm1 = DynamicTanh(dim, eps=norm_eps)
+        self.ffn_norm1 = DynamicTanh(dim, eps=norm_eps)
 
-        self.attention_norm2 = RMSNorm(dim, eps=norm_eps)
-        self.ffn_norm2 = RMSNorm(dim, eps=norm_eps)
+        self.attention_norm2 = DynamicTanh(dim, eps=norm_eps)
+        self.ffn_norm2 = DynamicTanh(dim, eps=norm_eps)
 
         self.modulation = modulation
         if modulation:
@@ -403,7 +415,7 @@ class JointTransformerBlock(nn.Module):
             )
             x = x + gate_mlp.unsqueeze(1).tanh() * self.ffn_norm2(
                 self.feed_forward(
-                    self.modulate(self.ffn_norm1(x), scale_mlp),
+                    self.modulate(self.ffn_norm1(x), scale_mlp), x_mask
                 )
             )
         else:
@@ -522,6 +534,7 @@ class Lumina(nn.Module):
         cap_feat_dim: int = 5120,
         axes_dims: List[int] = (16, 56, 56),
         axes_lens: List[int] = (1, 512, 512),
+        start_mask = 2
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -568,10 +581,10 @@ class Lumina(nn.Module):
                 for layer_id in range(n_refiner_layers)
             ]
         )
-
+        self.start_mask = start_mask
         self.t_embedder = TimestepEmbedder(min(dim, 1024))
         self.cap_embedder = nn.Sequential(
-            RMSNorm(cap_feat_dim, eps=norm_eps),
+            DynamicTanh(cap_feat_dim, eps=norm_eps),
             nn.Linear(
                 cap_feat_dim,
                 dim,
@@ -597,7 +610,7 @@ class Lumina(nn.Module):
                 for layer_id in range(n_layers)
             ]
         )
-        self.norm_final = RMSNorm(dim, eps=norm_eps)
+        self.norm_final = DynamicTanh(dim, eps=norm_eps)
         self.final_layer = FinalLayer(dim, patch_size, self.out_channels)
 
         assert (dim // n_heads) == sum(axes_dims)
@@ -801,12 +814,18 @@ class Lumina(nn.Module):
             x, cap_feats, cap_mask, t
         )
         freqs_cis = freqs_cis.to(x.device)
+        mid_mask = random_mask_tokens(mask, drop_ratio=0.5)
 
-        for layer in self.layers:
-            if self.training:
-                x = ckpt.checkpoint(layer, x, mask, freqs_cis, adaln_input)
+        for li, layer in enumerate(self.layers):
+            if  li < len(self.layers) - self.start_mask:
+                use_mask = mid_mask
             else:
-                x = layer(x, mask, freqs_cis, adaln_input)
+                use_mask = mask
+
+            if self.training:
+                x = ckpt.checkpoint(layer, x, use_mask, freqs_cis, adaln_input)
+            else:
+                x = layer(x, use_mask, freqs_cis, adaln_input)
 
         x = self.final_layer(x, adaln_input)
         x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)
@@ -894,7 +913,7 @@ if __name__ == "__main__":
     batch_size = 2
     C, H, W = 16, 64, 64  # in_channels=16 and H, W should be divisible by patch_size=2
     cap_len = 40
-    cap_feat_dim = 2304
+    cap_feat_dim = 640
 
     # Create dummy inputs
     x = torch.randn(batch_size, C, H, W, device=device, requires_grad=True)
