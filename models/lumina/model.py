@@ -5,41 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
-
-def random_mask_tokens(mask: torch.Tensor, drop_ratio=0.5):
-    B, N = mask.shape
-    new_mask = mask.clone()
-    for b in range(B):
-        active_idx = torch.nonzero(mask[b], as_tuple=False).squeeze(1)
-        if active_idx.numel() == 0:
-            continue
-        drop_count = int(drop_ratio * active_idx.numel())
-        drop_idx = torch.randperm(active_idx.numel(), device=mask.device)[:drop_count]
-        new_mask[b, active_idx[drop_idx]] = False
-    return new_mask
-
-class DynamicTanh(nn.Module):
-    def __init__(self, normalized_shape, channels_last = True, alpha_init_value=0.5, eps = 1e-4):
-        super().__init__()
-        self.normalized_shape = normalized_shape
-        self.alpha_init_value = alpha_init_value
-        self.channels_last = channels_last
-
-        self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
-        self.weight = nn.Parameter(torch.ones(normalized_shape))
-        self.bias = nn.Parameter(torch.zeros(normalized_shape))
-
-    def forward(self, x):
-        x = torch.tanh(self.alpha * x)
-        if self.channels_last:
-            x = x * self.weight + self.bias
-        else:
-            x = x * self.weight[:, None, None] + self.bias[:, None, None]
-        return x
-
-    def extra_repr(self):
-        return f"normalized_shape={self.normalized_shape}, alpha_init_value={self.alpha_init_value}, channels_last={self.channels_last}"
-
+from torch.nn import RMSNorm
 
 def modulate(x, scale):
     return x * (1 + scale.unsqueeze(1))
@@ -130,12 +96,13 @@ def apply_rotary_emb(
         Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor
             and key tensor with rotary embeddings.
     """
+    if freqs_cis is None:
+        return x_in
     with torch.autocast(enabled=False, device_type="cuda"):
         x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
         freqs_cis = freqs_cis.unsqueeze(2)
         x_out = torch.view_as_real(x * freqs_cis).flatten(3)
         return x_out.type_as(x_in)
-
 
 
 class TimestepEmbedder(nn.Module):
@@ -212,8 +179,8 @@ class JointAttention(nn.Module):
         nn.init.xavier_uniform_(self.out.weight)
 
         if qk_norm:
-            self.q_norm = DynamicTanh(self.head_dim)
-            self.k_norm = DynamicTanh(self.head_dim)
+            self.q_norm = RMSNorm(self.head_dim)
+            self.k_norm = RMSNorm(self.head_dim)
         else:
             self.q_norm = self.k_norm = nn.Identity()
 
@@ -279,41 +246,54 @@ class FeedForward(nn.Module):
         multiple_of: int,
         ffn_dim_multiplier: Optional[float],
     ):
+        """
+        Initialize the FeedForward module.
+
+        Args:
+            dim (int): Input dimension.
+            hidden_dim (int): Hidden dimension of the feedforward layer.
+            multiple_of (int): Value to ensure hidden dimension is a multiple
+                of this value.
+            ffn_dim_multiplier (float, optional): Custom multiplier for hidden
+                dimension. Defaults to None.
+
+        """
         super().__init__()
+        # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w1 = nn.Linear(
+            dim,
+            hidden_dim,
+            bias=False,
+        )
         nn.init.xavier_uniform_(self.w1.weight)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        nn.init.xavier_uniform_(self.w2.weight)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(
+            hidden_dim,
+            dim,
+            bias=False,
+        )
+        nn.init.zeros_(self.w2.weight)
+        self.w3 = nn.Linear(
+            dim,
+            hidden_dim,
+            bias=False,
+        )
         nn.init.xavier_uniform_(self.w3.weight)
+        self.use_compiled = False
 
     def _forward_silu_gating(self, x):
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        return self.w2(F.relu6(self.w1(x)) * self.w3(x))
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
-        """
-        x: [B, N, D]
-        mask: [B, N] boolean. True = unmasked (compute), False = masked (copy input)
-        """
-        if mask is None:
-            return self._forward_silu_gating(x)
-
-        # prepare output
-        out = x.clone()
-
-        # compute only on unmasked tokens
-        mask_exp = mask.unsqueeze(-1).expand_as(x)  # [B, N, D]
-        if mask.any():
-            x_unmasked = x[mask]  # [num_unmasked, D]
-            out_unmasked = self._forward_silu_gating(x_unmasked)
-            out[mask] = out_unmasked
-        return out
-
-
+    def forward(self, x):
+        # disabled for now
+        # https://github.com/pytorch/pytorch/issues/128035
+        # if self.use_compiled:
+        #     return torch.compile(self._forward_silu_gating)(x)
+        # else:
+        return self._forward_silu_gating(x)
 
 
 class JointTransformerBlock(nn.Module):
@@ -355,11 +335,11 @@ class JointTransformerBlock(nn.Module):
             ffn_dim_multiplier=ffn_dim_multiplier,
         )
         self.layer_id = layer_id
-        self.attention_norm1 = DynamicTanh(dim, eps=norm_eps)
-        self.ffn_norm1 = DynamicTanh(dim, eps=norm_eps)
+        self.attention_norm1 = RMSNorm(dim, eps=norm_eps)
+        self.ffn_norm1 = RMSNorm(dim, eps=norm_eps)
 
-        self.attention_norm2 = DynamicTanh(dim, eps=norm_eps)
-        self.ffn_norm2 = DynamicTanh(dim, eps=norm_eps)
+        self.attention_norm2 = RMSNorm(dim, eps=norm_eps)
+        self.ffn_norm2 = RMSNorm(dim, eps=norm_eps)
 
         self.modulation = modulation
         if modulation:
@@ -415,7 +395,7 @@ class JointTransformerBlock(nn.Module):
             )
             x = x + gate_mlp.unsqueeze(1).tanh() * self.ffn_norm2(
                 self.feed_forward(
-                    self.modulate(self.ffn_norm1(x), scale_mlp), x_mask
+                    self.modulate(self.ffn_norm1(x), scale_mlp),
                 )
             )
         else:
@@ -534,9 +514,14 @@ class Lumina(nn.Module):
         cap_feat_dim: int = 5120,
         axes_dims: List[int] = (16, 56, 56),
         axes_lens: List[int] = (1, 512, 512),
-        start_mask = 2
+        use_fast = False
     ) -> None:
         super().__init__()
+        if use_fast:
+            torch.backends.cuda.cudnn_sdp_enabled = True
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+            torch.backends.cuda.matmul.allow_fp16_accumulation = True
+            torch.set_float32_matmul_precision("medium")
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
@@ -581,10 +566,10 @@ class Lumina(nn.Module):
                 for layer_id in range(n_refiner_layers)
             ]
         )
-        self.start_mask = start_mask
+
         self.t_embedder = TimestepEmbedder(min(dim, 1024))
         self.cap_embedder = nn.Sequential(
-            DynamicTanh(cap_feat_dim, eps=norm_eps),
+            RMSNorm(cap_feat_dim, eps=norm_eps),
             nn.Linear(
                 cap_feat_dim,
                 dim,
@@ -610,7 +595,7 @@ class Lumina(nn.Module):
                 for layer_id in range(n_layers)
             ]
         )
-        self.norm_final = DynamicTanh(dim, eps=norm_eps)
+        self.norm_final = RMSNorm(dim, eps=norm_eps)
         self.final_layer = FinalLayer(dim, patch_size, self.out_channels)
 
         assert (dim // n_heads) == sum(axes_dims)
@@ -751,7 +736,7 @@ class Lumina(nn.Module):
             padded_full_embed[i, cap_len : cap_len + img_len] = padded_img_embed[
                 i, :img_len
             ]
-
+        print(mask.shape)
         return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
 
     def unpatchify(
@@ -796,40 +781,89 @@ class Lumina(nn.Module):
                 setattr(module, "use_compiled", True)
 
     def forward(self, x, t, cap_feats, cap_mask):
-        """
-        Forward pass of NextDiT.
-        t: (N,) tensor of diffusion timesteps
-        y: (N,) tensor of text tokens/features
-        """
-
-        t = self.t_embedder(t)  # (N, D)
+        """ Forward pass of NextDiT. """
+        t = self.t_embedder(t)
         adaln_input = t
-
-        cap_feats = self.cap_embedder(
-            cap_feats
-        )  # (N, L, D)  # todo check if able to batchify w.o. redundant compute
-
+        cap_feats = self.cap_embedder(cap_feats)
         x_is_tensor = isinstance(x, torch.Tensor)
         x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(
             x, cap_feats, cap_mask, t
         )
         freqs_cis = freqs_cis.to(x.device)
-        mid_mask = random_mask_tokens(mask, drop_ratio=0.5)
 
-        for li, layer in enumerate(self.layers):
-            if  li < len(self.layers) - self.start_mask:
-                use_mask = mid_mask
+        n_layers = len(self.layers)
+        dropped_info = None
+
+        for i, layer in enumerate(self.layers):
+            use_rope = (i % 2 == 0)
+            # At layer 1, if training, randomly drop 50% of tokens and store them.
+            if self.training and i == 1 and n_layers >= 4:
+                B, N, _ = x.shape
+                n_tokens_to_keep = N // 2
+
+                # Generate a unique random permutation for each batch element
+                perm = torch.stack([torch.randperm(N, device=x.device) for _ in range(B)])
+
+                keep_indices = perm[:, :n_tokens_to_keep]
+                drop_indices = perm[:, n_tokens_to_keep:]
+
+                # Sort indices to ensure correct order when using scatter
+                keep_indices, _ = torch.sort(keep_indices, dim=1)
+                drop_indices, _ = torch.sort(drop_indices, dim=1)
+
+                # Store the dropped tensors and their original indices
+                dropped_x = torch.gather(x, 1, drop_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+                dropped_mask = torch.gather(mask, 1, drop_indices)
+                dropped_freqs_cis = torch.gather(freqs_cis, 1,
+                                                 drop_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]))
+                dropped_info = (dropped_x, dropped_mask, dropped_freqs_cis, keep_indices, drop_indices)
+
+                # Overwrite tensors with the kept tokens for subsequent layers
+                x = torch.gather(x, 1, keep_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
+                mask = torch.gather(mask, 1, keep_indices)
+                freqs_cis = torch.gather(freqs_cis, 1, keep_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]))
+
+            # At the second-to-last layer, reintroduce the dropped tokens
+            if self.training and i == n_layers - 2 and dropped_info is not None:
+                dropped_x, dropped_mask, dropped_freqs_cis, keep_indices, drop_indices = dropped_info
+
+                N_orig = keep_indices.shape[1] + drop_indices.shape[1]
+
+                # Create empty tensors with the original sequence length
+                full_x = torch.empty((x.shape[0], N_orig, x.shape[-1]), dtype=x.dtype, device=x.device)
+                full_mask = torch.empty((mask.shape[0], N_orig), dtype=mask.dtype, device=mask.device)
+                full_freqs_cis = torch.empty((freqs_cis.shape[0], N_orig, freqs_cis.shape[-1]), dtype=freqs_cis.dtype,
+                                             device=freqs_cis.device)
+
+                # Use scatter to reassemble the tensors in their original positions
+                full_x.scatter_(1, keep_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]), x)
+                full_x.scatter_(1, drop_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]), dropped_x)
+
+                full_mask.scatter_(1, keep_indices, mask)
+                full_mask.scatter_(1, drop_indices, dropped_mask)
+
+                full_freqs_cis.scatter_(1, keep_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]), freqs_cis)
+                full_freqs_cis.scatter_(1, drop_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]),
+                                        dropped_freqs_cis)
+
+                x, mask, freqs_cis = full_x, full_mask, full_freqs_cis
+                dropped_info = None  # Clear the stored information
+            if not use_rope:
+                # pass identity tensor to disable rotation
+                freqs = None
             else:
-                use_mask = mask
+                freqs = freqs_cis
+                print(freqs.shape)
 
+            # --- Original layer processing ---
             if self.training:
-                x = ckpt.checkpoint(layer, x, use_mask, freqs_cis, adaln_input)
+                x = ckpt.checkpoint(layer, x, mask, freqs, adaln_input)
             else:
-                x = layer(x, use_mask, freqs_cis, adaln_input)
+                x = layer(x, mask, freqs, adaln_input)
+        # --- MODIFICATION END ---
 
         x = self.final_layer(x, adaln_input)
         x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)
-
         return x
 
     def forward_with_cfg(
