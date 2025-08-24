@@ -96,7 +96,7 @@ class Lumina2Model(pl.LightningModule):
         self.cap_feat_dim = self.text_encoder.config.hidden_size
 
         # Create model:
-        self.model = Lumina_2b().to(dtype=torch.float32)
+        self.model = Lumina_2b()
         logger.info(f"DiT Parameters: {self.model.parameter_count():,}")
         self.model_patch_size = self.model.patch_size
 
