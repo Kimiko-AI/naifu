@@ -736,7 +736,6 @@ class Lumina(nn.Module):
             padded_full_embed[i, cap_len : cap_len + img_len] = padded_img_embed[
                 i, :img_len
             ]
-        print(mask.shape)
         return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
 
     def unpatchify(
