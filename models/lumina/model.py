@@ -104,6 +104,54 @@ def apply_rotary_emb(
         x_out = torch.view_as_real(x * freqs_cis).flatten(3)
         return x_out.type_as(x_in)
 
+class NerfBlock(nn.Module):
+    def __init__(self, hidden_size_s, hidden_size_x, mlp_ratio=4):
+        super().__init__()
+        self.hidden_size_x = hidden_size_x
+        self.mlp_ratio = mlp_ratio
+        param_dim = 2 * hidden_size_x * (hidden_size_x * mlp_ratio)
+        self.param_generator = nn.Linear(hidden_size_s, param_dim)
+        self.norm = RMSNorm(hidden_size_x)
+
+    def forward(self, x, s):
+        # x: [B, N, Hx]
+        # s: [B, Hs]   (batch here corresponds to per-patch batch)
+        B, N, Hx = x.shape
+        mlp_params = self.param_generator(s)  # [B, 2 * Hx * Hx * r]
+        fc1_param, fc2_param = mlp_params.chunk(2, dim=-1)
+        fc1 = fc1_param.view(B, Hx, Hx * self.mlp_ratio)    # [B, Hx, Hx*r]
+        fc2 = fc2_param.view(B, Hx * self.mlp_ratio, Hx)    # [B, Hx*r, Hx]
+
+        fc1 = F.normalize(fc1, dim=-2)  # normalize across input dim
+
+        res = x
+        x = self.norm(x)                 # [B, N, Hx]
+        x = torch.bmm(x, fc1)            # [B, N, Hx*r]
+        x = F.silu(x)
+        x = torch.bmm(x, fc2)            # [B, N, Hx]
+        x = x + res
+        return x
+
+
+class PatchEncoder(nn.Module):
+    def __init__(self, patch_dim, hidden_s):
+        super().__init__()
+        self.proj = nn.Linear(patch_dim, hidden_s)
+
+    def forward(self, patches):
+        # patches: [B, L, patch_dim]
+        return F.silu(self.proj(patches))  # [B, L, hidden_s]
+
+class TokenEmbedder(nn.Module):
+    def __init__(self, in_c, hidden_x, patch_size):
+        super().__init__()
+        self.token_proj = nn.Linear(in_c, hidden_x)
+        self.pos = nn.Parameter(torch.randn(patch_size * patch_size, hidden_x))
+
+    def forward(self, tokens):
+        # tokens: [B*L, N, C]
+        out = self.token_proj(tokens) + self.pos.unsqueeze(0)
+        return out  # [B*L, N, hidden_x]
 
 class TimestepEmbedder(nn.Module):
     """
@@ -514,7 +562,12 @@ class Lumina(nn.Module):
         cap_feat_dim: int = 5120,
         axes_dims: List[int] = (16, 56, 56),
         axes_lens: List[int] = (1, 512, 512),
-        use_fast = False
+        use_fast = False,
+        nerf_dim = 64,
+        nerf_block = 4,
+        hidden_s=256,
+        hidden_x=64,
+
     ) -> None:
         super().__init__()
         if use_fast:
@@ -525,9 +578,19 @@ class Lumina(nn.Module):
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
-
+        self.nerf_dim = nerf_dim
+        self.nerf_block = nerf_block
+        self.encoder = PatchEncoder(in_channels * patch_size * patch_size, hidden_s)
+        self.nerf_blocks = nn.ModuleList([
+            NerfBlock(hidden_s, hidden_x, mlp_ratio=4)
+            for _ in range(nerf_block)
+        ])
+        self.final = nn.Linear(hidden_x, in_channels)
+        self.hidden_x = hidden_x
+        self.hidden_s = hidden_s
+        self.token_embedder = TokenEmbedder(in_channels, hidden_x, patch_size)
         self.x_embedder = nn.Linear(
-            in_features=patch_size * patch_size * in_channels,
+            in_features= hidden_s,
             out_features=dim,
             bias=True,
         )
@@ -596,7 +659,7 @@ class Lumina(nn.Module):
             ]
         )
         self.norm_final = RMSNorm(dim, eps=norm_eps)
-        self.final_layer = FinalLayer(dim, patch_size, self.out_channels)
+        self.final_layer = FinalLayer(dim, 1, self.hidden_s)
 
         assert (dim // n_heads) == sum(axes_dims)
         self.axes_dims = axes_dims
@@ -616,7 +679,7 @@ class Lumina(nn.Module):
     ]:
         # TODO: clean this padding logic and separate it into dedicated function
         bsz = len(x)
-        pH = pW = self.patch_size
+        pH = pW = 1
         device = x[0].device
 
         l_effective_cap_len = cap_mask.sum(dim=1).tolist()
@@ -687,7 +750,7 @@ class Lumina(nn.Module):
         # refine context
         for layer in self.context_refiner:
             if self.training:
-                cap_feats = ckpt.checkpoint(layer, cap_feats, cap_mask, cap_freqs_cis)
+                cap_feats = ckpt.checkpoint(layer, cap_feats, cap_mask, cap_freqs_cis, use_reentrant = False)
             else:
                 cap_feats = layer(cap_feats, cap_mask, cap_freqs_cis)
 
@@ -711,12 +774,11 @@ class Lumina(nn.Module):
         for i in range(bsz):
             padded_img_embed[i, : l_effective_img_len[i]] = x[i]
             padded_img_mask[i, : l_effective_img_len[i]] = True
-
         padded_img_embed = self.x_embedder(padded_img_embed)
         for layer in self.noise_refiner:
             if self.training:
                 padded_img_embed = ckpt.checkpoint(
-                    layer, padded_img_embed, padded_img_mask, img_freqs_cis, t
+                    layer, padded_img_embed, padded_img_mask, img_freqs_cis, t, use_reentrant = False
                 )
             else:
                 padded_img_embed = layer(
@@ -749,15 +811,16 @@ class Lumina(nn.Module):
         x: (N, T, patch_size**2 * C)
         imgs: (N, H, W, C)
         """
-        pH = pW = self.patch_size
+        pH = pW = 1
         imgs = []
         for i in range(x.size(0)):
             H, W = img_size[i]
             begin = cap_size[i]
             end = begin + (H // pH) * (W // pW)
+
             imgs.append(
                 x[i][begin:end]
-                .view(H // pH, W // pW, pH, pW, self.out_channels)
+                .view(H // pH, W // pW, pH, pW, self.hidden_s)
                 .permute(4, 0, 2, 1, 3)
                 .flatten(3, 4)
                 .flatten(1, 2)
@@ -781,6 +844,13 @@ class Lumina(nn.Module):
 
     def forward(self, x, t, cap_feats, cap_mask):
         """ Forward pass of NextDiT. """
+        B, C, H, W = x.shape
+        ps = self.patch_size
+        patches_unf = F.unfold(x, kernel_size=ps, stride=ps)
+        patches = patches_unf.transpose(1, 2).contiguous()
+        B, L, _ = patches.shape
+        s = self.encoder(patches)
+        x = s.view(B, -1, H // self.patch_size, W // self.patch_size, )
         t = self.t_embedder(t)
         adaln_input = t
         cap_feats = self.cap_embedder(cap_feats)
@@ -855,14 +925,24 @@ class Lumina(nn.Module):
 
             # --- Original layer processing ---
             if self.training:
-                x = ckpt.checkpoint(layer, x, mask, freqs, adaln_input)
+                x = ckpt.checkpoint(layer, x, mask, freqs, adaln_input, use_reentrant=False)
             else:
                 x = layer(x, mask, freqs, adaln_input)
         # --- MODIFICATION END ---
-
         x = self.final_layer(x, adaln_input)
         x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)
-        return x
+        x = x.flatten(2,3).transpose(1, 2)
+        patch_pixels = patches.view(B, L, C, ps * ps).permute(0, 1, 3, 2).contiguous()
+        tokens = patch_pixels.view(B * L, ps * ps, C)
+        tokens = self.token_embedder(tokens)
+        s_flat = s.view(B * L, -1)
+        for block in self.nerf_blocks:
+            tokens = ckpt.checkpoint(block, tokens, s_flat, use_reentrant = False)  # [B*L, N, hidden_x]
+        out_tokens = self.final(tokens)  # [B*L, N, C]
+        out_patch_pixels = out_tokens.view(B, L, ps * ps, C).permute(0, 1, 3, 2).contiguous()
+        out_unf = out_patch_pixels.view(B, L, C * ps * ps).transpose(1, 2).contiguous()
+        out = F.fold(out_unf, output_size=(H, W), kernel_size=ps, stride=ps)
+        return out
 
     def forward_with_cfg(
             self,
@@ -916,8 +996,8 @@ class Lumina(nn.Module):
 
 def Lumina_2b(**kwargs):
     return Lumina(
-        patch_size=2,
-        in_channels=16,
+        patch_size=16,
+        in_channels=3,
         dim=768,
         n_layers=12,
         n_heads=8,
@@ -943,7 +1023,7 @@ if __name__ == "__main__":
 
     # Dummy input
     batch_size = 2
-    C, H, W = 16, 64, 64  # in_channels=16 and H, W should be divisible by patch_size=2
+    C, H, W = 3, 256, 256  # in_channels=16 and H, W should be divisible by patch_size=2
     cap_len = 40
     cap_feat_dim = 640
 
