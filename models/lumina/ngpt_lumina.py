@@ -7,9 +7,33 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
 from torch.nn import RMSNorm
 
+class ReparamLinear(nn.Module):
+    def __init__(self, in_features, out_features, bias=True, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))
+        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+        self.eps = eps
+
+    def forward(self, x):
+        # Normalize each row of weights
+        w = self.weight / (self.weight.norm(dim=1, keepdim=True) + self.eps)
+        return F.linear(x, w, self.bias)
+
 def modulate(x, scale):
     return x * (1 + scale.unsqueeze(1))
 
+def l2_normalize(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    return x / (x.norm(dim=-1, keepdim=True) + eps)
+
+@torch.no_grad()
+def normalize_linear_columns_(W: torch.Tensor, eps: float = 1e-12):
+    # W: [out, in] ; normalize columns (in-dim)
+    W.div_(W.norm(dim=0, keepdim=True).clamp_min_(eps))
+
+def normalize_module_params_(m: nn.Module):
+    for mod in m.modules():
+        if isinstance(mod, ReparamLinear):
+            normalize_linear_columns_(mod.weight)
 
 def precompute_freqs_cis(
     dim: List[int],
@@ -113,13 +137,13 @@ class TimestepEmbedder(nn.Module):
     def __init__(self, hidden_size, frequency_embedding_size=256):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(
+            ReparamLinear(
                 frequency_embedding_size,
                 hidden_size,
                 bias=True,
             ),
             nn.SiLU(),
-            nn.Linear(
+            ReparamLinear(
                 hidden_size,
                 hidden_size,
                 bias=True,
@@ -137,26 +161,8 @@ class TimestepEmbedder(nn.Module):
         t_emb = self.mlp(t_freq.to(self.mlp[0].weight.dtype))
         return t_emb
 
-
 class JointAttention(nn.Module):
-    """Multi-head attention module."""
-
-    def __init__(
-        self,
-        dim: int,
-        n_heads: int,
-        n_kv_heads: Optional[int],
-        qk_norm: bool,
-    ):
-        """
-        Initialize the Attention module.
-
-        Args:
-            dim (int): Number of input dimensions.
-            n_heads (int): Number of heads.
-            n_kv_heads (Optional[int]): Number of kv heads, if using GQA.
-
-        """
+    def __init__(self, dim: int, n_heads: int, n_kv_heads: Optional[int], qk_norm: bool):
         super().__init__()
         self.n_kv_heads = n_heads if n_kv_heads is None else n_kv_heads
         self.n_local_heads = n_heads
@@ -164,299 +170,157 @@ class JointAttention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = dim // n_heads
 
-        self.qkv = nn.Linear(
-            dim,
-            (n_heads + self.n_kv_heads + self.n_kv_heads) * self.head_dim,
-            bias=False,
-        )
+        self.qkv = ReparamLinear(dim, (n_heads + self.n_kv_heads + self.n_kv_heads) * self.head_dim, bias=False)
         nn.init.xavier_uniform_(self.qkv.weight)
 
-        self.out = nn.Linear(
-            n_heads * self.head_dim,
-            dim,
-            bias=False,
-        )
+        self.out = ReparamLinear(n_heads * self.head_dim, dim, bias=False)
         nn.init.xavier_uniform_(self.out.weight)
 
-        if qk_norm:
-            self.q_norm = RMSNorm(self.head_dim)
-            self.k_norm = RMSNorm(self.head_dim)
-        else:
-            self.q_norm = self.k_norm = nn.Identity()
+        # learnable per-dim rescalers for q and k
+        self.s_q = nn.Parameter(torch.ones(self.head_dim))
+        self.s_k = nn.Parameter(torch.ones(self.head_dim))
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        x_mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
-    ) -> torch.Tensor:
-
+    def forward(self, x: torch.Tensor, x_mask: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
         bsz, seqlen, _ = x.shape
         dtype = x.dtype
 
         xq, xk, xv = torch.split(
             self.qkv(x),
-            [
-                self.n_local_heads * self.head_dim,
-                self.n_local_kv_heads * self.head_dim,
-                self.n_local_kv_heads * self.head_dim,
-            ],
+            [self.n_local_heads * self.head_dim,
+             self.n_local_kv_heads * self.head_dim,
+             self.n_local_kv_heads * self.head_dim],
             dim=-1,
         )
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
-        xq = self.q_norm(xq)
-        xk = self.k_norm(xk)
 
+        # RoPE
         xq = apply_rotary_emb(xq, freqs_cis=freqs_cis)
         xk = apply_rotary_emb(xk, freqs_cis=freqs_cis)
+
+        # nGPT: per-vector L2 norm + learned rescale
+        xq = l2_normalize(xq) * self.s_q
+        xk = l2_normalize(xk) * self.s_k
         xq, xk = xq.to(dtype), xk.to(dtype)
 
-        softmax_scale = math.sqrt(1 / self.head_dim)
+        # nGPT: use sqrt(d) scale
+        softmax_scale = math.sqrt(self.head_dim)
 
         n_rep = self.n_local_heads // self.n_local_kv_heads
         if n_rep >= 1:
             xk = xk.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
             xv = xv.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-        output = (
-            F.scaled_dot_product_attention(
-                xq.permute(0, 2, 1, 3),
-                xk.permute(0, 2, 1, 3),
-                xv.permute(0, 2, 1, 3),
-                attn_mask=x_mask.bool()
-                .view(bsz, 1, 1, seqlen)
-                .expand(-1, self.n_local_heads, seqlen, -1),
-                scale=softmax_scale,
-            )
-            .permute(0, 2, 1, 3)
-            .to(dtype)
-        )
 
-        output = output.flatten(-2)
+        output = F.scaled_dot_product_attention(
+            xq.permute(0, 2, 1, 3),
+            xk.permute(0, 2, 1, 3),
+            xv.permute(0, 2, 1, 3),
+            attn_mask=x_mask.bool().view(bsz, 1, 1, seqlen).expand(-1, self.n_local_heads, seqlen, -1),
+            scale=softmax_scale,
+        ).permute(0, 2, 1, 3).to(dtype)
 
-        return self.out(output)
+        return self.out(output.flatten(-2))
+
 
 
 class FeedForward(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        hidden_dim: int,
-        multiple_of: int,
-        ffn_dim_multiplier: Optional[float],
-    ):
-        """
-        Initialize the FeedForward module.
-
-        Args:
-            dim (int): Input dimension.
-            hidden_dim (int): Hidden dimension of the feedforward layer.
-            multiple_of (int): Value to ensure hidden dimension is a multiple
-                of this value.
-            ffn_dim_multiplier (float, optional): Custom multiplier for hidden
-                dimension. Defaults to None.
-
-        """
+    def __init__(self, dim: int, hidden_dim: int, multiple_of: int, ffn_dim_multiplier: Optional[float]):
         super().__init__()
-        # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(
-            dim,
-            hidden_dim,
-            bias=False,
-        )
+        self.w1 = ReparamLinear(dim, hidden_dim, bias=False)
+        self.w2 = ReparamLinear(hidden_dim, dim, bias=False)
+        self.w3 = ReparamLinear(dim, hidden_dim, bias=False)
         nn.init.xavier_uniform_(self.w1.weight)
-        self.w2 = nn.Linear(
-            hidden_dim,
-            dim,
-            bias=False,
-        )
         nn.init.zeros_(self.w2.weight)
-        self.w3 = nn.Linear(
-            dim,
-            hidden_dim,
-            bias=False,
-        )
         nn.init.xavier_uniform_(self.w3.weight)
-        self.use_compiled = False
 
-    def _forward_silu_gating(self, x):
-        return self.w2(F.relu6(self.w1(x)) * self.w3(x))
+        # nGPT scalers
+        self.s_u = nn.Parameter(torch.ones(hidden_dim))
+        self.s_v = nn.Parameter(torch.ones(hidden_dim))
 
     def forward(self, x):
-        # disabled for now
-        # https://github.com/pytorch/pytorch/issues/128035
-        # if self.use_compiled:
-        #     return torch.compile(self._forward_silu_gating)(x)
-        # else:
-        return self._forward_silu_gating(x)
-
+        u = self.w1(x)
+        u = u * self.s_u
+        h = F.relu6(u) * self.w3(x)
+        h = h * self.s_v
+        return self.w2(h)
 
 class JointTransformerBlock(nn.Module):
-    def __init__(
-        self,
-        layer_id: int,
-        dim: int,
-        n_heads: int,
-        n_kv_heads: int,
-        multiple_of: int,
-        ffn_dim_multiplier: float,
-        norm_eps: float,
-        qk_norm: bool,
-        modulation=True,
-    ) -> None:
-        """
-        Initialize a TransformerBlock.
-
-        Args:
-            layer_id (int): Identifier for the layer.
-            dim (int): Embedding dimension of the input features.
-            n_heads (int): Number of attention heads.
-            n_kv_heads (Optional[int]): Number of attention heads in key and
-                value features (if using GQA), or set to None for the same as
-                query.
-            multiple_of (int):
-            ffn_dim_multiplier (float):
-            norm_eps (float):
-
-        """
+    def __init__(self, layer_id, dim, n_heads, n_kv_heads, multiple_of, ffn_dim_multiplier, norm_eps, qk_norm, modulation=True):
         super().__init__()
         self.dim = dim
-        self.head_dim = dim // n_heads
         self.attention = JointAttention(dim, n_heads, n_kv_heads, qk_norm)
-        self.feed_forward = FeedForward(
-            dim=dim,
-            hidden_dim=4 * dim,
-            multiple_of=multiple_of,
-            ffn_dim_multiplier=ffn_dim_multiplier,
-        )
+        self.feed_forward = FeedForward(dim=dim, hidden_dim=4 * dim, multiple_of=multiple_of, ffn_dim_multiplier=ffn_dim_multiplier)
         self.layer_id = layer_id
-        self.attention_norm1 = RMSNorm(dim, eps=norm_eps)
-        self.ffn_norm1 = RMSNorm(dim, eps=norm_eps)
-
-        self.attention_norm2 = RMSNorm(dim, eps=norm_eps)
-        self.ffn_norm2 = RMSNorm(dim, eps=norm_eps)
-
         self.modulation = modulation
+
         if modulation:
             self.adaLN_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(
-                    min(dim, 1024),
-                    4 * dim,
-                    bias=True,
-                ),
+                ReparamLinear(min(dim, 1024), 4 * dim, bias=True),
             )
             nn.init.zeros_(self.adaLN_modulation[1].weight)
             nn.init.zeros_(self.adaLN_modulation[1].bias)
 
+        # nGPT: per-dim eigen learning-rate (alphas)
+        self.alpha_attn = nn.Parameter(torch.full((dim,), 0.05))
+        self.alpha_mlp  = nn.Parameter(torch.full((dim,), 0.05))
+
         self.use_compiled = False
+        self.modulate = torch.compile(modulate) if self.use_compiled else modulate
 
-        if self.use_compiled:
-            self.modulate = torch.compile(modulate)
-        else:
-            self.modulate = modulate
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        x_mask: torch.Tensor,
-        freqs_cis: torch.Tensor,
-        adaln_input: Optional[torch.Tensor] = None,
-    ):
-        """
-        Perform a forward pass through the TransformerBlock.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-            freqs_cis (torch.Tensor): Precomputed cosine and sine frequencies.
-
-        Returns:
-            torch.Tensor: Output tensor after applying attention and
-                feedforward layers.
-
-        """
+    def forward(self, x, x_mask, freqs_cis, adaln_input: Optional[torch.Tensor] = None):
         if self.modulation:
             assert adaln_input is not None
-            scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(
-                adaln_input
-            ).chunk(4, dim=1)
+            scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).chunk(4, dim=1)
 
-            x = x + gate_msa.unsqueeze(1).tanh() * self.attention_norm2(
-                self.attention(
-                    self.modulate(self.attention_norm1(x), scale_msa),
-                    x_mask,
-                    freqs_cis,
-                )
-            )
-            x = x + gate_mlp.unsqueeze(1).tanh() * self.ffn_norm2(
-                self.feed_forward(
-                    self.modulate(self.ffn_norm1(x), scale_mlp),
-                )
-            )
+            # Attention step on the sphere
+            h = x
+            hA = self.attention(self.modulate(h, scale_msa), x_mask, freqs_cis)
+            x = l2_normalize(h + self.alpha_attn.unsqueeze(0).unsqueeze(0) * (hA - h))
+            x = x + gate_msa.unsqueeze(1).tanh() * 0  # keep gate param in graph
+
+            # MLP step on the sphere
+            h = x
+            hM = self.feed_forward(self.modulate(h, scale_mlp))
+            x = l2_normalize(h + self.alpha_mlp.unsqueeze(0).unsqueeze(0) * (hM - h))
+            x = x + gate_mlp.unsqueeze(1).tanh() * 0
         else:
-            assert adaln_input is None
-            x = x + self.attention_norm2(
-                self.attention(
-                    self.attention_norm1(x),
-                    x_mask,
-                    freqs_cis,
-                )
-            )
-            x = x + self.ffn_norm2(
-                self.feed_forward(
-                    self.ffn_norm1(x),
-                )
-            )
+            # Same but without AdaLN modulate
+            h = x
+            hA = self.attention(h, x_mask, freqs_cis)
+            x = l2_normalize(h + self.alpha_attn.unsqueeze(0).unsqueeze(0) * (hA - h))
+
+            h = x
+            hM = self.feed_forward(h)
+            x = l2_normalize(h + self.alpha_mlp.unsqueeze(0).unsqueeze(0) * (hM - h))
         return x
 
-
 class FinalLayer(nn.Module):
-    """
-    The final layer of NextDiT.
-    """
-
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
-        self.norm_final = nn.LayerNorm(
-            hidden_size,
-            elementwise_affine=False,
-            eps=1e-6,
-        )
-        self.linear = nn.Linear(
-            hidden_size,
-            patch_size * patch_size * out_channels,
-            bias=True,
-        )
+        self.linear = ReparamLinear(hidden_size, patch_size * patch_size * out_channels, bias=True)
         nn.init.zeros_(self.linear.weight)
         nn.init.zeros_(self.linear.bias)
 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(
-                min(hidden_size, 1024),
-                hidden_size,
-                bias=True,
-            ),
+            ReparamLinear(min(hidden_size, 1024), hidden_size, bias=True),
         )
         nn.init.zeros_(self.adaLN_modulation[1].weight)
         nn.init.zeros_(self.adaLN_modulation[1].bias)
 
         self.use_compiled = False
-        if self.use_compiled:
-            self.modulate = torch.compile(modulate)
-        else:
-            self.modulate = modulate
+        self.modulate = torch.compile(modulate) if self.use_compiled else modulate
 
     def forward(self, x, c):
         scale = self.adaLN_modulation(c)
-        x = self.modulate(self.norm_final(x), scale)
-        x = self.linear(x)
-        return x
+        x = self.modulate(x, scale)
+        return self.linear(x)
 
 
 class RopeEmbedder:
@@ -526,7 +390,7 @@ class Lumina(nn.Module):
         self.out_channels = in_channels
         self.patch_size = patch_size
 
-        self.x_embedder = nn.Linear(
+        self.x_embedder = ReparamLinear(
             in_features=patch_size * patch_size * in_channels,
             out_features=dim,
             bias=True,
@@ -568,17 +432,16 @@ class Lumina(nn.Module):
         )
 
         self.t_embedder = TimestepEmbedder(min(dim, 1024))
+        self.t_to_token = ReparamLinear(min(dim, 1024), dim, bias=True)
+        nn.init.xavier_uniform_(self.t_to_token.weight);
+        nn.init.zeros_(self.t_to_token.bias)
+
         self.cap_embedder = nn.Sequential(
-            RMSNorm(cap_feat_dim, eps=norm_eps),
-            nn.Linear(
-                cap_feat_dim,
-                dim,
-                bias=True,
-            ),
+            ReparamLinear(cap_feat_dim, dim, bias=True),
         )
-        nn.init.trunc_normal_(self.cap_embedder[1].weight, std=0.02)
-        # nn.init.zeros_(self.cap_embedder[1].weight)
-        nn.init.zeros_(self.cap_embedder[1].bias)
+        nn.init.trunc_normal_(self.cap_embedder[0].weight, std=0.02)
+        nn.init.zeros_(self.cap_embedder[0].bias)
+        nn.init.zeros_(self.cap_embedder[0].bias)
 
         self.layers = nn.ModuleList(
             [
@@ -595,7 +458,6 @@ class Lumina(nn.Module):
                 for layer_id in range(n_layers)
             ]
         )
-        self.norm_final = RMSNorm(dim, eps=norm_eps)
         self.final_layer = FinalLayer(dim, patch_size, self.out_channels)
 
         assert (dim // n_heads) == sum(axes_dims)
@@ -604,85 +466,54 @@ class Lumina(nn.Module):
         self.rope_embedder = RopeEmbedder(axes_dims=axes_dims, axes_lens=axes_lens)
         self.dim = dim
         self.n_heads = n_heads
-
-    def patchify_and_embed(
-        self,
-        x: List[torch.Tensor] | torch.Tensor,
-        cap_feats: torch.Tensor,
-        cap_mask: torch.Tensor,
-        t: torch.Tensor,
-    ) -> Tuple[
-        torch.Tensor, torch.Tensor, List[Tuple[int, int]], List[int], torch.Tensor
-    ]:
-        # TODO: clean this padding logic and separate it into dedicated function
+    def patchify_and_embed(self, x: List[torch.Tensor] | torch.Tensor, cap_feats: torch.Tensor, cap_mask: torch.Tensor, t_vec: torch.Tensor):
         bsz = len(x)
         pH = pW = self.patch_size
         device = x[0].device
+
+        # prepend 1 time token to context
+        time_token = self.t_to_token(t_vec).unsqueeze(1)         # [B,1,dim]
+        cap_feats = self.cap_embedder(cap_feats)                  # [B,Lc,dim]
+        cap_feats = torch.cat([time_token, cap_feats], dim=1)     # [B,1+Lc,dim]
+        cap_mask = torch.cat([torch.ones(bsz, 1, dtype=torch.bool, device=device), cap_mask], dim=1)
 
         l_effective_cap_len = cap_mask.sum(dim=1).tolist()
         img_sizes = [(img.size(1), img.size(2)) for img in x]
         l_effective_img_len = [(H // pH) * (W // pW) for (H, W) in img_sizes]
 
-        max_seq_len = max(
-            (
-                cap_len + img_len
-                for cap_len, img_len in zip(l_effective_cap_len, l_effective_img_len)
-            )
-        )
+        max_seq_len = max((cap_len + img_len for cap_len, img_len in zip(l_effective_cap_len, l_effective_img_len)))
         max_cap_len = max(l_effective_cap_len)
         max_img_len = max(l_effective_img_len)
 
-        position_ids = torch.zeros(
-            bsz, max_seq_len, 3, dtype=torch.int32, device=device
-        )
+        position_ids = torch.zeros(bsz, max_seq_len, 3, dtype=torch.int32, device=device)
 
         for i in range(bsz):
-            cap_len = l_effective_cap_len[i]
+            cap_len = l_effective_cap_len[i]                         # includes time token
             img_len = l_effective_img_len[i]
             H, W = img_sizes[i]
             H_tokens, W_tokens = H // pH, W // pW
-            assert H_tokens * W_tokens == img_len
 
-            position_ids[i, :cap_len, 0] = torch.arange(
-                cap_len, dtype=torch.int32, device=device
-            )
-            position_ids[i, cap_len : cap_len + img_len, 0] = cap_len
-            row_ids = (
-                torch.arange(H_tokens, dtype=torch.int32, device=device)
-                .view(-1, 1)
-                .repeat(1, W_tokens)
-                .flatten()
-            )
-            col_ids = (
-                torch.arange(W_tokens, dtype=torch.int32, device=device)
-                .view(1, -1)
-                .repeat(H_tokens, 1)
-                .flatten()
-            )
-            position_ids[i, cap_len : cap_len + img_len, 1] = row_ids
-            position_ids[i, cap_len : cap_len + img_len, 2] = col_ids
+            position_ids[i, :cap_len, 0] = torch.arange(cap_len, dtype=torch.int32, device=device)  # 0..cap_len-1
+            position_ids[i, cap_len: cap_len + img_len, 0] = cap_len
+
+            row_ids = torch.arange(H_tokens, dtype=torch.int32, device=device).view(-1, 1).repeat(1, W_tokens).flatten()
+            col_ids = torch.arange(W_tokens, dtype=torch.int32, device=device).view(1, -1).repeat(H_tokens, 1).flatten()
+            position_ids[i, cap_len: cap_len + img_len, 1] = row_ids
+            position_ids[i, cap_len: cap_len + img_len, 2] = col_ids
 
         freqs_cis = self.rope_embedder(position_ids)
 
-        # build freqs_cis for cap and image individually
-        cap_freqs_cis_shape = list(freqs_cis.shape)
-        # cap_freqs_cis_shape[1] = max_cap_len
-        cap_freqs_cis_shape[1] = cap_feats.shape[1]
-        cap_freqs_cis = torch.zeros(
-            *cap_freqs_cis_shape, device=device, dtype=freqs_cis.dtype
-        )
-
-        img_freqs_cis_shape = list(freqs_cis.shape)
-        img_freqs_cis_shape[1] = max_img_len
-        img_freqs_cis = torch.zeros(
-            *img_freqs_cis_shape, device=device, dtype=freqs_cis.dtype
-        )
+        # build cap/img freqs
+        cap_freqs_cis_shape = list(freqs_cis.shape); cap_freqs_cis_shape[1] = max_cap_len
+        cap_freqs_cis = torch.zeros(*cap_freqs_cis_shape, device=device, dtype=freqs_cis.dtype)
+        img_freqs_cis_shape = list(freqs_cis.shape); img_freqs_cis_shape[1] = max_img_len
+        img_freqs_cis = torch.zeros(*img_freqs_cis_shape, device=device, dtype=freqs_cis.dtype)
 
         for i in range(bsz):
             cap_len = l_effective_cap_len[i]
             img_len = l_effective_img_len[i]
             cap_freqs_cis[i, :cap_len] = freqs_cis[i, :cap_len]
-            img_freqs_cis[i, :img_len] = freqs_cis[i, cap_len : cap_len + img_len]
+            img_freqs_cis[i, :img_len] = freqs_cis[i, cap_len: cap_len + img_len]
 
         # refine context
         for layer in self.context_refiner:
@@ -691,22 +522,14 @@ class Lumina(nn.Module):
             else:
                 cap_feats = layer(cap_feats, cap_mask, cap_freqs_cis)
 
-        # refine image
+        # patchify images -> embed -> refine noise
         flat_x = []
         for i in range(bsz):
-            img = x[i]
-            C, H, W = img.size()
-            img = (
-                img.view(C, H // pH, pH, W // pW, pW)
-                .permute(1, 3, 2, 4, 0)
-                .flatten(2)
-                .flatten(0, 1)
-            )
+            img = x[i]; C, H, W = img.size()
+            img = (img.view(C, H // pH, pH, W // pW, pW).permute(1, 3, 2, 4, 0).flatten(2).flatten(0, 1))
             flat_x.append(img)
         x = flat_x
-        padded_img_embed = torch.zeros(
-            bsz, max_img_len, x[0].shape[-1], device=device, dtype=x[0].dtype
-        )
+        padded_img_embed = torch.zeros(bsz, max_img_len, x[0].shape[-1], device=device, dtype=x[0].dtype)
         padded_img_mask = torch.zeros(bsz, max_img_len, dtype=torch.bool, device=device)
         for i in range(bsz):
             padded_img_embed[i, : l_effective_img_len[i]] = x[i]
@@ -715,27 +538,18 @@ class Lumina(nn.Module):
         padded_img_embed = self.x_embedder(padded_img_embed)
         for layer in self.noise_refiner:
             if self.training:
-                padded_img_embed = ckpt.checkpoint(
-                    layer, padded_img_embed, padded_img_mask, img_freqs_cis, t
-                )
+                padded_img_embed = ckpt.checkpoint(layer, padded_img_embed, padded_img_mask, img_freqs_cis, t_vec)
             else:
-                padded_img_embed = layer(
-                    padded_img_embed, padded_img_mask, img_freqs_cis, t
-                )
+                padded_img_embed = layer(padded_img_embed, padded_img_mask, img_freqs_cis, t_vec)
 
+        # concat context + image
         mask = torch.zeros(bsz, max_seq_len, dtype=torch.bool, device=device)
-        padded_full_embed = torch.zeros(
-            bsz, max_seq_len, self.dim, device=device, dtype=x[0].dtype
-        )
+        padded_full_embed = torch.zeros(bsz, max_seq_len, self.dim, device=device, dtype=padded_img_embed.dtype)
         for i in range(bsz):
-            cap_len = l_effective_cap_len[i]
-            img_len = l_effective_img_len[i]
-
+            cap_len = l_effective_cap_len[i]; img_len = l_effective_img_len[i]
             mask[i, : cap_len + img_len] = True
             padded_full_embed[i, :cap_len] = cap_feats[i, :cap_len]
-            padded_full_embed[i, cap_len : cap_len + img_len] = padded_img_embed[
-                i, :img_len
-            ]
+            padded_full_embed[i, cap_len: cap_len + img_len] = padded_img_embed[i, :img_len]
         return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
 
     def unpatchify(
@@ -780,14 +594,10 @@ class Lumina(nn.Module):
                 setattr(module, "use_compiled", True)
 
     def forward(self, x, t, cap_feats, cap_mask):
-        """ Forward pass of NextDiT. """
-        t = self.t_embedder(t)
-        adaln_input = t
-        cap_feats = self.cap_embedder(cap_feats)
+        t_vec = self.t_embedder(t)                     # [B, min(dim,1024)]
+        adaln_input = t_vec
         x_is_tensor = isinstance(x, torch.Tensor)
-        x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(
-            x, cap_feats, cap_mask, t
-        )
+        x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(x, cap_feats, cap_mask, t_vec)
         freqs_cis = freqs_cis.to(x.device)
 
         n_layers = len(self.layers)
@@ -795,74 +605,51 @@ class Lumina(nn.Module):
 
         for i, layer in enumerate(self.layers):
             use_rope = (i % 2 == 0)
-            # At layer 1, if training, randomly drop 50% of tokens and store them.
             if self.training and i == 1 and n_layers >= 4:
                 B, N, _ = x.shape
                 n_tokens_to_keep = N // 2
-
-                # Generate a unique random permutation for each batch element
                 perm = torch.stack([torch.randperm(N, device=x.device) for _ in range(B)])
+                keep_indices = perm[:, :n_tokens_to_keep].sort(dim=1).values
+                drop_indices = perm[:, n_tokens_to_keep:].sort(dim=1).values
 
-                keep_indices = perm[:, :n_tokens_to_keep]
-                drop_indices = perm[:, n_tokens_to_keep:]
-
-                # Sort indices to ensure correct order when using scatter
-                keep_indices, _ = torch.sort(keep_indices, dim=1)
-                drop_indices, _ = torch.sort(drop_indices, dim=1)
-
-                # Store the dropped tensors and their original indices
                 dropped_x = torch.gather(x, 1, drop_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
                 dropped_mask = torch.gather(mask, 1, drop_indices)
-                dropped_freqs_cis = torch.gather(freqs_cis, 1,
-                                                 drop_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]))
+                dropped_freqs_cis = torch.gather(freqs_cis, 1, drop_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]))
                 dropped_info = (dropped_x, dropped_mask, dropped_freqs_cis, keep_indices, drop_indices)
 
-                # Overwrite tensors with the kept tokens for subsequent layers
                 x = torch.gather(x, 1, keep_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
                 mask = torch.gather(mask, 1, keep_indices)
                 freqs_cis = torch.gather(freqs_cis, 1, keep_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]))
 
-            # At the second-to-last layer, reintroduce the dropped tokens
             if self.training and i == n_layers - 2 and dropped_info is not None:
-                dropped_x, dropped_mask, dropped_freqs_cis, keep_indices, drop_indices = dropped_info
+                dropped_x, dropped_mask, dropped_freqs_cis, keep_idx, drop_idx = dropped_info
+                N_orig = keep_idx.shape[1] + drop_idx.shape[1]
 
-                N_orig = keep_indices.shape[1] + drop_indices.shape[1]
+                full_x = torch.empty((x.size(0), N_orig, x.size(-1)), dtype=x.dtype, device=x.device)
+                full_mask = torch.empty((mask.size(0), N_orig), dtype=mask.dtype, device=mask.device)
+                full_freqs = torch.empty((freqs_cis.size(0), N_orig, freqs_cis.size(-1)),
+                                         dtype=freqs_cis.dtype, device=freqs_cis.device)
+                full_x[:, keep_idx[0]] = x
+                full_x[:, drop_idx[0]] = dropped_x
+                full_mask[:, keep_idx[0]] = mask
+                full_mask[:, drop_idx[0]] = dropped_mask
+                full_freqs[:, keep_idx[0]] = freqs_cis
+                full_freqs[:, drop_idx[0]] = dropped_freqs_cis
 
-                # Create empty tensors with the original sequence length
-                full_x = torch.empty((x.shape[0], N_orig, x.shape[-1]), dtype=x.dtype, device=x.device)
-                full_mask = torch.empty((mask.shape[0], N_orig), dtype=mask.dtype, device=mask.device)
-                full_freqs_cis = torch.empty((freqs_cis.shape[0], N_orig, freqs_cis.shape[-1]), dtype=freqs_cis.dtype,
-                                             device=freqs_cis.device)
+                x, mask, freqs_cis = full_x, full_mask, full_freqs
+                dropped_info = None
 
-                # Use scatter to reassemble the tensors in their original positions
-                full_x.scatter_(1, keep_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]), x)
-                full_x.scatter_(1, drop_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]), dropped_x)
-
-                full_mask.scatter_(1, keep_indices, mask)
-                full_mask.scatter_(1, drop_indices, dropped_mask)
-
-                full_freqs_cis.scatter_(1, keep_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]), freqs_cis)
-                full_freqs_cis.scatter_(1, drop_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]),
-                                        dropped_freqs_cis)
-
-                x, mask, freqs_cis = full_x, full_mask, full_freqs_cis
-                dropped_info = None  # Clear the stored information
-            if not use_rope:
-                # pass identity tensor to disable rotation
-                freqs = None
-            else:
-                freqs = freqs_cis
-
-            # --- Original layer processing ---
-            if self.training:
-                x = ckpt.checkpoint(layer, x, mask, freqs, adaln_input)
-            else:
-                x = layer(x, mask, freqs, adaln_input)
-        # --- MODIFICATION END ---
+            freqs = freqs_cis if use_rope else None
+            x = ckpt.checkpoint(layer, x, mask, freqs, adaln_input) if self.training else layer(x, mask, freqs, adaln_input)
 
         x = self.final_layer(x, adaln_input)
         x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)
         return x
+
+    # convenience: call after optimizer.step()
+    def normalize_params_(self):
+        normalize_module_params_(self)
+
 
     def forward_with_cfg(
             self,
