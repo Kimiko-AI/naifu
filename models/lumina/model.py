@@ -1,157 +1,32 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+# References:
+# GLIDE: https://github.com/openai/glide-text2im
+# MAE: https://github.com/facebookresearch/mae/blob/main/models_mae.py
+# --------------------------------------------------------
+
 import math
 from typing import List, Optional, Tuple
 
+from flash_attn import flash_attn_varlen_func
+from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.utils.checkpoint as ckpt
-from torch.nn import RMSNorm
+from common.logging import logger
 
 def modulate(x, scale):
     return x * (1 + scale.unsqueeze(1))
 
 
-def precompute_freqs_cis(
-    dim: List[int],
-    end: List[int],
-    theta: float = 10000.0,
-):
-    """
-    Precompute the frequency tensor for complex exponentials (cis) with
-    given dimensions.
+#############################################################################
+#             Embedding Layers for Timesteps and Class Labels               #
+#############################################################################
 
-    This function calculates a frequency tensor with complex exponentials
-    using the given dimension 'dim' and the end index 'end'. The 'theta'
-    parameter scales the frequencies. The returned tensor contains complex
-    values in complex64 data type.
-
-    Args:
-        dim (list): Dimension of the frequency tensor.
-        end (list): End index for precomputing frequencies.
-        theta (float, optional): Scaling factor for frequency computation.
-            Defaults to 10000.0.
-
-    Returns:
-        torch.Tensor: Precomputed frequency tensor with complex
-            exponentials.
-    """
-    freqs_cis = []
-    for i, (d, e) in enumerate(zip(dim, end)):
-        freqs = 1.0 / (
-            theta ** (torch.arange(0, d, 2, dtype=torch.float64, device="cpu") / d)
-        )
-        timestep = torch.arange(e, device=freqs.device, dtype=torch.float64)
-        freqs = torch.outer(timestep, freqs).float()
-        freqs_cis_i = torch.polar(torch.ones_like(freqs), freqs).to(
-            torch.complex64
-        )  # complex64
-        freqs_cis.append(freqs_cis_i)
-
-    return freqs_cis
-
-
-def timestep_embedding(t, dim, max_period=10000):
-    """
-    Create sinusoidal timestep embeddings.
-    :param t: a 1-D Tensor of N indices, one per batch element.
-                        These may be fractional.
-    :param dim: the dimension of the output.
-    :param max_period: controls the minimum frequency of the embeddings.
-    :return: an (N, D) Tensor of positional embeddings.
-    """
-    # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
-    half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period)
-        * torch.arange(start=0, end=half, dtype=torch.float32)
-        / half
-    ).to(device=t.device)
-    args = t[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if dim % 2:
-        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    return embedding
-
-
-def apply_rotary_emb(
-    x_in: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Apply rotary embeddings to input tensors using the given frequency
-    tensor.
-
-    This function applies rotary embeddings to the given query 'xq' and
-    key 'xk' tensors using the provided frequency tensor 'freqs_cis'. The
-    input tensors are reshaped as complex numbers, and the frequency tensor
-    is reshaped for broadcasting compatibility. The resulting tensors
-    contain rotary embeddings and are returned as real tensors.
-
-    Args:
-        x_in (torch.Tensor): Query or Key tensor to apply rotary embeddings.
-        freqs_cis (torch.Tensor): Precomputed frequency tensor for complex
-            exponentials.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor
-            and key tensor with rotary embeddings.
-    """
-    if freqs_cis is None:
-        return x_in
-    with torch.autocast(enabled=False, device_type="cuda"):
-        x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
-        freqs_cis = freqs_cis.unsqueeze(2)
-        x_out = torch.view_as_real(x * freqs_cis).flatten(3)
-        return x_out.type_as(x_in)
-
-class NerfBlock(nn.Module):
-    def __init__(self, hidden_size_s, hidden_size_x, mlp_ratio=4):
-        super().__init__()
-        self.hidden_size_x = hidden_size_x
-        self.mlp_ratio = mlp_ratio
-        param_dim = 2 * hidden_size_x * (hidden_size_x * mlp_ratio)
-        self.param_generator = nn.Linear(hidden_size_s, param_dim)
-        self.norm = RMSNorm(hidden_size_x)
-
-    def forward(self, x, s):
-        # x: [B, N, Hx]
-        # s: [B, Hs]   (batch here corresponds to per-patch batch)
-        B, N, Hx = x.shape
-        mlp_params = self.param_generator(s)  # [B, 2 * Hx * Hx * r]
-        fc1_param, fc2_param = mlp_params.chunk(2, dim=-1)
-        fc1 = fc1_param.view(B, Hx, Hx * self.mlp_ratio)    # [B, Hx, Hx*r]
-        fc2 = fc2_param.view(B, Hx * self.mlp_ratio, Hx)    # [B, Hx*r, Hx]
-
-        fc1 = F.normalize(fc1, dim=-2)  # normalize across input dim
-
-        res = x
-        x = self.norm(x)                 # [B, N, Hx]
-        x = torch.bmm(x, fc1)            # [B, N, Hx*r]
-        x = F.silu(x)
-        x = torch.bmm(x, fc2)            # [B, N, Hx]
-        x = x + res
-        return x
-
-
-class PatchEncoder(nn.Module):
-    def __init__(self, patch_dim, hidden_s):
-        super().__init__()
-        self.proj = nn.Linear(patch_dim, hidden_s)
-
-    def forward(self, patches):
-        # patches: [B, L, patch_dim]
-        return F.silu(self.proj(patches))  # [B, L, hidden_s]
-
-class TokenEmbedder(nn.Module):
-    def __init__(self, in_c, hidden_x, patch_size):
-        super().__init__()
-        self.token_proj = nn.Linear(in_c, hidden_x)
-        self.pos = nn.Parameter(torch.randn(patch_size * patch_size, hidden_x))
-
-    def forward(self, tokens):
-        # tokens: [B*L, N, C]
-        out = self.token_proj(tokens) + self.pos.unsqueeze(0)
-        return out  # [B*L, N, hidden_x]
 
 class TimestepEmbedder(nn.Module):
     """
@@ -180,10 +55,50 @@ class TimestepEmbedder(nn.Module):
 
         self.frequency_embedding_size = frequency_embedding_size
 
+    @staticmethod
+    def timestep_embedding(t, dim, max_period=10000):
+        """
+        Create sinusoidal timestep embeddings.
+        :param t: a 1-D Tensor of N indices, one per batch element.
+                          These may be fractional.
+        :param dim: the dimension of the output.
+        :param max_period: controls the minimum frequency of the embeddings.
+        :return: an (N, D) Tensor of positional embeddings.
+        """
+        # https://github.com/openai/glide-text2im/blob/main/glide_text2im/nn.py
+        half = dim // 2
+        freqs = torch.exp(-math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(
+            device=t.device
+        )
+        args = t[:, None].float() * freqs[None]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:
+            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        return embedding
+
     def forward(self, t):
-        t_freq = timestep_embedding(t, self.frequency_embedding_size)
+        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
         t_emb = self.mlp(t_freq.to(self.mlp[0].weight.dtype))
         return t_emb
+
+
+#############################################################################
+#                               Core NextDiT Model                              #
+#############################################################################
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        # x: [B, *, D]
+        norm_x = x.norm(2, -1, keepdim=True)
+        rms_x = norm_x * x.shape[-1] ** (-0.5)
+        x_normed = x / (rms_x + self.eps)
+        return self.weight * x_normed
 
 
 class JointAttention(nn.Module):
@@ -230,7 +145,90 @@ class JointAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim)
             self.k_norm = RMSNorm(self.head_dim)
         else:
-            self.q_norm = self.k_norm = nn.Identity()
+            self.q_norm = self.k_norm = None
+
+    @staticmethod
+    def apply_rotary_emb(
+        x_in: torch.Tensor,
+        freqs_cis: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply rotary embeddings to input tensors using the given frequency
+        tensor.
+
+        This function applies rotary embeddings to the given query 'xq' and
+        key 'xk' tensors using the provided frequency tensor 'freqs_cis'. The
+        input tensors are reshaped as complex numbers, and the frequency tensor
+        is reshaped for broadcasting compatibility. The resulting tensors
+        contain rotary embeddings and are returned as real tensors.
+
+        Args:
+            x_in (torch.Tensor): Query or Key tensor to apply rotary embeddings.
+            freqs_cis (torch.Tensor): Precomputed frequency tensor for complex
+                exponentials.
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor
+                and key tensor with rotary embeddings.
+        """
+        with torch.amp.autocast('cuda'):
+            x = torch.view_as_complex(x_in.float().reshape(*x_in.shape[:-1], -1, 2))
+            freqs_cis = freqs_cis.unsqueeze(2)
+            x_out = torch.view_as_real(x * freqs_cis).flatten(3)
+            return x_out.type_as(x_in)
+
+    # copied from huggingface modeling_llama.py
+    def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
+        def _get_unpad_data(attention_mask):
+            seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
+            indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+            max_seqlen_in_batch = seqlens_in_batch.max().item()
+            cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+            return (
+                indices,
+                cu_seqlens,
+                max_seqlen_in_batch,
+            )
+
+        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
+        batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
+
+        key_layer = index_first_axis(
+            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim),
+            indices_k,
+        )
+        value_layer = index_first_axis(
+            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim),
+            indices_k,
+        )
+        if query_length == kv_seq_len:
+            query_layer = index_first_axis(
+                query_layer.reshape(batch_size * kv_seq_len, self.n_local_heads, head_dim),
+                indices_k,
+            )
+            cu_seqlens_q = cu_seqlens_k
+            max_seqlen_in_batch_q = max_seqlen_in_batch_k
+            indices_q = indices_k
+        elif query_length == 1:
+            max_seqlen_in_batch_q = 1
+            cu_seqlens_q = torch.arange(
+                batch_size + 1, dtype=torch.int32, device=query_layer.device
+            )  # There is a memcpy here, that is very bad.
+            indices_q = cu_seqlens_q[:-1]
+            query_layer = query_layer.squeeze(1)
+        else:
+            # The -q_len: slice assumes left padding.
+            attention_mask = attention_mask[:, -query_length:]
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+
+        return (
+            query_layer,
+            key_layer,
+            value_layer,
+            indices_q,
+            (cu_seqlens_q, cu_seqlens_k),
+            (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
+        )
 
     def forward(
         self,
@@ -238,7 +236,16 @@ class JointAttention(nn.Module):
         x_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
     ) -> torch.Tensor:
+        """
 
+        Args:
+            x:
+            x_mask:
+            freqs_cis:
+
+        Returns:
+
+        """
         bsz, seqlen, _ = x.shape
         dtype = x.dtype
 
@@ -256,30 +263,57 @@ class JointAttention(nn.Module):
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         xq = self.q_norm(xq)
         xk = self.k_norm(xk)
-
-        xq = apply_rotary_emb(xq, freqs_cis=freqs_cis)
-        xk = apply_rotary_emb(xk, freqs_cis=freqs_cis)
+        xq = JointAttention.apply_rotary_emb(xq, freqs_cis=freqs_cis)
+        xk = JointAttention.apply_rotary_emb(xk, freqs_cis=freqs_cis)
         xq, xk = xq.to(dtype), xk.to(dtype)
 
         softmax_scale = math.sqrt(1 / self.head_dim)
 
-        n_rep = self.n_local_heads // self.n_local_kv_heads
-        if n_rep >= 1:
-            xk = xk.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-            xv = xv.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
-        output = (
-            F.scaled_dot_product_attention(
-                xq.permute(0, 2, 1, 3),
-                xk.permute(0, 2, 1, 3),
-                xv.permute(0, 2, 1, 3),
-                attn_mask=x_mask.bool()
-                .view(bsz, 1, 1, seqlen)
-                .expand(-1, self.n_local_heads, seqlen, -1),
-                scale=softmax_scale,
+        if dtype in [torch.float16, torch.bfloat16]:
+            # begin var_len flash attn
+            (
+                query_states,
+                key_states,
+                value_states,
+                indices_q,
+                cu_seq_lens,
+                max_seq_lens,
+            ) = self._upad_input(xq, xk, xv, x_mask, seqlen)
+
+            cu_seqlens_q, cu_seqlens_k = cu_seq_lens
+            max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
+
+            attn_output_unpad = flash_attn_varlen_func(
+                query_states,
+                key_states,
+                value_states,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_in_batch_q,
+                max_seqlen_k=max_seqlen_in_batch_k,
+                dropout_p=0.0,
+                causal=False,
+                softmax_scale=softmax_scale,
             )
-            .permute(0, 2, 1, 3)
-            .to(dtype)
-        )
+            output = pad_input(attn_output_unpad, indices_q, bsz, seqlen)
+            # end var_len_flash_attn
+
+        else:
+            n_rep = self.n_local_heads // self.n_local_kv_heads
+            if n_rep >= 1:
+                xk = xk.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
+                xv = xv.unsqueeze(3).repeat(1, 1, 1, n_rep, 1).flatten(2, 3)
+            output = (
+                F.scaled_dot_product_attention(
+                    xq.permute(0, 2, 1, 3),
+                    xk.permute(0, 2, 1, 3),
+                    xv.permute(0, 2, 1, 3),
+                    attn_mask=x_mask.bool().view(bsz, 1, 1, seqlen).expand(-1, self.n_local_heads, seqlen, -1),
+                    scale=softmax_scale,
+                )
+                .permute(0, 2, 1, 3)
+                .to(dtype)
+            )
 
         output = output.flatten(-2)
 
@@ -323,25 +357,20 @@ class FeedForward(nn.Module):
             dim,
             bias=False,
         )
-        nn.init.zeros_(self.w2.weight)
+        nn.init.xavier_uniform_(self.w2.weight)
         self.w3 = nn.Linear(
             dim,
             hidden_dim,
             bias=False,
         )
         nn.init.xavier_uniform_(self.w3.weight)
-        self.use_compiled = False
 
-    def _forward_silu_gating(self, x):
-        return self.w2(F.relu6(self.w1(x)) * self.w3(x))
+    # @torch.compile
+    def _forward_silu_gating(self, x1, x3):
+        return F.silu(x1) * x3
 
     def forward(self, x):
-        # disabled for now
-        # https://github.com/pytorch/pytorch/issues/128035
-        # if self.use_compiled:
-        #     return torch.compile(self._forward_silu_gating)(x)
-        # else:
-        return self._forward_silu_gating(x)
+        return self.w2(self._forward_silu_gating(self.w1(x), self.w3(x)))
 
 
 class JointTransformerBlock(nn.Module):
@@ -355,7 +384,7 @@ class JointTransformerBlock(nn.Module):
         ffn_dim_multiplier: float,
         norm_eps: float,
         qk_norm: bool,
-        modulation=True,
+        modulation=True
     ) -> None:
         """
         Initialize a TransformerBlock.
@@ -402,19 +431,12 @@ class JointTransformerBlock(nn.Module):
             nn.init.zeros_(self.adaLN_modulation[1].weight)
             nn.init.zeros_(self.adaLN_modulation[1].bias)
 
-        self.use_compiled = False
-
-        if self.use_compiled:
-            self.modulate = torch.compile(modulate)
-        else:
-            self.modulate = modulate
-
     def forward(
         self,
         x: torch.Tensor,
         x_mask: torch.Tensor,
         freqs_cis: torch.Tensor,
-        adaln_input: Optional[torch.Tensor] = None,
+        adaln_input: Optional[torch.Tensor]=None,
     ):
         """
         Perform a forward pass through the TransformerBlock.
@@ -430,20 +452,18 @@ class JointTransformerBlock(nn.Module):
         """
         if self.modulation:
             assert adaln_input is not None
-            scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(
-                adaln_input
-            ).chunk(4, dim=1)
+            scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation(adaln_input).chunk(4, dim=1)
 
             x = x + gate_msa.unsqueeze(1).tanh() * self.attention_norm2(
                 self.attention(
-                    self.modulate(self.attention_norm1(x), scale_msa),
+                    modulate(self.attention_norm1(x), scale_msa),
                     x_mask,
                     freqs_cis,
                 )
             )
             x = x + gate_mlp.unsqueeze(1).tanh() * self.ffn_norm2(
                 self.feed_forward(
-                    self.modulate(self.ffn_norm1(x), scale_mlp),
+                    modulate(self.ffn_norm1(x), scale_mlp),
                 )
             )
         else:
@@ -494,54 +514,37 @@ class FinalLayer(nn.Module):
         nn.init.zeros_(self.adaLN_modulation[1].weight)
         nn.init.zeros_(self.adaLN_modulation[1].bias)
 
-        self.use_compiled = False
-        if self.use_compiled:
-            self.modulate = torch.compile(modulate)
-        else:
-            self.modulate = modulate
-
     def forward(self, x, c):
         scale = self.adaLN_modulation(c)
-        x = self.modulate(self.norm_final(x), scale)
+        x = modulate(self.norm_final(x), scale)
         x = self.linear(x)
         return x
 
 
 class RopeEmbedder:
     def __init__(
-        self,
-        theta: float = 10000.0,
-        axes_dims: List[int] = (16, 56, 56),
-        axes_lens: List[int] = (1, 512, 512),
+        self, theta: float = 10000.0, axes_dims: List[int] = (16, 56, 56), axes_lens: List[int] = (1, 512, 512)
     ):
         super().__init__()
         self.theta = theta
         self.axes_dims = axes_dims
         self.axes_lens = axes_lens
-        self.freqs_cis = precompute_freqs_cis(
-            self.axes_dims, self.axes_lens, theta=self.theta
-        )
+        self.freqs_cis = NextDiT.precompute_freqs_cis(self.axes_dims, self.axes_lens, theta=self.theta)
 
     def __call__(self, ids: torch.Tensor):
         self.freqs_cis = [freqs_cis.to(ids.device) for freqs_cis in self.freqs_cis]
         result = []
         for i in range(len(self.axes_dims)):
-            index = (
-                ids[:, :, i : i + 1]
-                .repeat(1, 1, self.freqs_cis[i].shape[-1])
-                .to(torch.int64)
-            )
-            result.append(
-                torch.gather(
-                    self.freqs_cis[i].unsqueeze(0).repeat(index.shape[0], 1, 1),
-                    dim=1,
-                    index=index,
-                )
-            )
+            # import torch.distributed as dist
+            # if not dist.is_initialized() or dist.get_rank() == 0:
+            #     import pdb
+            #     pdb.set_trace()
+            index = ids[:, :, i:i+1].repeat(1, 1, self.freqs_cis[i].shape[-1]).to(torch.int64)
+            result.append(torch.gather(self.freqs_cis[i].unsqueeze(0).repeat(index.shape[0], 1, 1), dim=1, index=index))
         return torch.cat(result, dim=-1)
 
 
-class Lumina(nn.Module):
+class NextDiT(nn.Module):
     """
     Diffusion model with a Transformer backbone.
     """
@@ -562,35 +565,14 @@ class Lumina(nn.Module):
         cap_feat_dim: int = 5120,
         axes_dims: List[int] = (16, 56, 56),
         axes_lens: List[int] = (1, 512, 512),
-        use_fast = False,
-        nerf_dim = 64,
-        nerf_block = 4,
-        hidden_s=256,
-        hidden_x=64,
-
     ) -> None:
         super().__init__()
-        if use_fast:
-            torch.backends.cuda.cudnn_sdp_enabled = True
-            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
-            torch.backends.cuda.matmul.allow_fp16_accumulation = True
-            torch.set_float32_matmul_precision("medium")
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.patch_size = patch_size
-        self.nerf_dim = nerf_dim
-        self.nerf_block = nerf_block
-        self.encoder = PatchEncoder(in_channels * patch_size * patch_size, hidden_s)
-        self.nerf_blocks = nn.ModuleList([
-            NerfBlock(hidden_s, hidden_x, mlp_ratio=4)
-            for _ in range(nerf_block)
-        ])
-        self.final = nn.Linear(hidden_x, in_channels)
-        self.hidden_x = hidden_x
-        self.hidden_s = hidden_s
-        self.token_embedder = TokenEmbedder(in_channels, hidden_x, patch_size)
+
         self.x_embedder = nn.Linear(
-            in_features= hidden_s,
+            in_features=patch_size * patch_size * in_channels,
             out_features=dim,
             bias=True,
         )
@@ -659,7 +641,7 @@ class Lumina(nn.Module):
             ]
         )
         self.norm_final = RMSNorm(dim, eps=norm_eps)
-        self.final_layer = FinalLayer(dim, 1, self.hidden_s)
+        self.final_layer = FinalLayer(dim, patch_size, self.out_channels)
 
         assert (dim // n_heads) == sum(axes_dims)
         self.axes_dims = axes_dims
@@ -668,159 +650,22 @@ class Lumina(nn.Module):
         self.dim = dim
         self.n_heads = n_heads
 
-    def patchify_and_embed(
-        self,
-        x: List[torch.Tensor] | torch.Tensor,
-        cap_feats: torch.Tensor,
-        cap_mask: torch.Tensor,
-        t: torch.Tensor,
-    ) -> Tuple[
-        torch.Tensor, torch.Tensor, List[Tuple[int, int]], List[int], torch.Tensor
-    ]:
-        # TODO: clean this padding logic and separate it into dedicated function
-        bsz = len(x)
-        pH = pW = 1
-        device = x[0].device
-
-        l_effective_cap_len = cap_mask.sum(dim=1).tolist()
-        img_sizes = [(img.size(1), img.size(2)) for img in x]
-        l_effective_img_len = [(H // pH) * (W // pW) for (H, W) in img_sizes]
-
-        max_seq_len = max(
-            (
-                cap_len + img_len
-                for cap_len, img_len in zip(l_effective_cap_len, l_effective_img_len)
-            )
-        )
-        max_cap_len = max(l_effective_cap_len)
-        max_img_len = max(l_effective_img_len)
-
-        position_ids = torch.zeros(
-            bsz, max_seq_len, 3, dtype=torch.int32, device=device
-        )
-
-        for i in range(bsz):
-            cap_len = l_effective_cap_len[i]
-            img_len = l_effective_img_len[i]
-            H, W = img_sizes[i]
-            H_tokens, W_tokens = H // pH, W // pW
-            assert H_tokens * W_tokens == img_len
-
-            position_ids[i, :cap_len, 0] = torch.arange(
-                cap_len, dtype=torch.int32, device=device
-            )
-            position_ids[i, cap_len : cap_len + img_len, 0] = cap_len
-            row_ids = (
-                torch.arange(H_tokens, dtype=torch.int32, device=device)
-                .view(-1, 1)
-                .repeat(1, W_tokens)
-                .flatten()
-            )
-            col_ids = (
-                torch.arange(W_tokens, dtype=torch.int32, device=device)
-                .view(1, -1)
-                .repeat(H_tokens, 1)
-                .flatten()
-            )
-            position_ids[i, cap_len : cap_len + img_len, 1] = row_ids
-            position_ids[i, cap_len : cap_len + img_len, 2] = col_ids
-
-        freqs_cis = self.rope_embedder(position_ids)
-
-        # build freqs_cis for cap and image individually
-        cap_freqs_cis_shape = list(freqs_cis.shape)
-        # cap_freqs_cis_shape[1] = max_cap_len
-        cap_freqs_cis_shape[1] = cap_feats.shape[1]
-        cap_freqs_cis = torch.zeros(
-            *cap_freqs_cis_shape, device=device, dtype=freqs_cis.dtype
-        )
-
-        img_freqs_cis_shape = list(freqs_cis.shape)
-        img_freqs_cis_shape[1] = max_img_len
-        img_freqs_cis = torch.zeros(
-            *img_freqs_cis_shape, device=device, dtype=freqs_cis.dtype
-        )
-
-        for i in range(bsz):
-            cap_len = l_effective_cap_len[i]
-            img_len = l_effective_img_len[i]
-            cap_freqs_cis[i, :cap_len] = freqs_cis[i, :cap_len]
-            img_freqs_cis[i, :img_len] = freqs_cis[i, cap_len : cap_len + img_len]
-
-        # refine context
-        for layer in self.context_refiner:
-            if self.training:
-                cap_feats = ckpt.checkpoint(layer, cap_feats, cap_mask, cap_freqs_cis, use_reentrant = False)
-            else:
-                cap_feats = layer(cap_feats, cap_mask, cap_freqs_cis)
-
-        # refine image
-        flat_x = []
-        for i in range(bsz):
-            img = x[i]
-            C, H, W = img.size()
-            img = (
-                img.view(C, H // pH, pH, W // pW, pW)
-                .permute(1, 3, 2, 4, 0)
-                .flatten(2)
-                .flatten(0, 1)
-            )
-            flat_x.append(img)
-        x = flat_x
-        padded_img_embed = torch.zeros(
-            bsz, max_img_len, x[0].shape[-1], device=device, dtype=x[0].dtype
-        )
-        padded_img_mask = torch.zeros(bsz, max_img_len, dtype=torch.bool, device=device)
-        for i in range(bsz):
-            padded_img_embed[i, : l_effective_img_len[i]] = x[i]
-            padded_img_mask[i, : l_effective_img_len[i]] = True
-        padded_img_embed = self.x_embedder(padded_img_embed)
-        for layer in self.noise_refiner:
-            if self.training:
-                padded_img_embed = ckpt.checkpoint(
-                    layer, padded_img_embed, padded_img_mask, img_freqs_cis, t, use_reentrant = False
-                )
-            else:
-                padded_img_embed = layer(
-                    padded_img_embed, padded_img_mask, img_freqs_cis, t
-                )
-
-        mask = torch.zeros(bsz, max_seq_len, dtype=torch.bool, device=device)
-        padded_full_embed = torch.zeros(
-            bsz, max_seq_len, self.dim, device=device, dtype=x[0].dtype
-        )
-        for i in range(bsz):
-            cap_len = l_effective_cap_len[i]
-            img_len = l_effective_img_len[i]
-
-            mask[i, : cap_len + img_len] = True
-            padded_full_embed[i, :cap_len] = cap_feats[i, :cap_len]
-            padded_full_embed[i, cap_len : cap_len + img_len] = padded_img_embed[
-                i, :img_len
-            ]
-        return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
-
     def unpatchify(
-        self,
-        x: torch.Tensor,
-        img_size: List[Tuple[int, int]],
-        cap_size: List[int],
-        return_tensor=False,
+        self, x: torch.Tensor, img_size: List[Tuple[int, int]], cap_size: List[int], return_tensor=False
     ) -> List[torch.Tensor]:
         """
         x: (N, T, patch_size**2 * C)
         imgs: (N, H, W, C)
         """
-        pH = pW = 1
+        pH = pW = self.patch_size
         imgs = []
         for i in range(x.size(0)):
             H, W = img_size[i]
             begin = cap_size[i]
             end = begin + (H // pH) * (W // pW)
-
             imgs.append(
                 x[i][begin:end]
-                .view(H // pH, W // pW, pH, pW, self.hidden_s)
+                .view(H // pH, W // pW, pH, pW, self.out_channels)
                 .permute(4, 0, 2, 1, 3)
                 .flatten(3, 4)
                 .flatten(1, 2)
@@ -830,131 +675,138 @@ class Lumina(nn.Module):
             imgs = torch.stack(imgs, dim=0)
         return imgs
 
-    @property
-    def device(self):
-        # Get the device of the module (assumes all parameters are on the same device)
-        return next(self.parameters()).device
+    def patchify_and_embed(
+        self, x: List[torch.Tensor] | torch.Tensor, cap_feats: torch.Tensor, cap_mask: torch.Tensor, t: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[Tuple[int, int]], List[int], torch.Tensor]:
+        bsz = len(x)
+        pH = pW = self.patch_size
+        device = x[0].device
 
-    def set_use_compiled(self):
-        for name, module in self.named_modules():
-            # Check if the module has the 'use_compiled' attribute
-            if hasattr(module, "use_compiled"):
-                print(f"Setting 'use_compiled' to True in module: {name}")
-                setattr(module, "use_compiled", True)
+        l_effective_cap_len = cap_mask.sum(dim=1).tolist()
+        img_sizes = [(img.size(1), img.size(2)) for img in x]
+        l_effective_img_len = [(H // pH) * (W // pW) for (H, W) in img_sizes]
+
+
+        max_seq_len = max(
+            (cap_len+img_len for cap_len, img_len in zip(l_effective_cap_len, l_effective_img_len))
+        )
+        max_cap_len = max(l_effective_cap_len)
+        max_img_len = max(l_effective_img_len)
+        # logger.info(f"l_effective_cap_len: {l_effective_cap_len}")
+        # logger.info(f"l_effective_img_len: {l_effective_img_len}")
+        # logger.info(f"img_sizes: {img_sizes}")
+        # logger.info(f"max_seq_len: {max_seq_len}")
+        # logger.info(f"max_cap_len: {max_cap_len}")
+        # logger.info(f"max_img_len: {max_img_len}")
+        # logger.info(f"bsz: {bsz}")
+        position_ids = torch.zeros(bsz, max_seq_len, 3, dtype=torch.int32, device=device)
+
+        for i in range(bsz):
+            cap_len = l_effective_cap_len[i]
+            img_len = l_effective_img_len[i]
+            H, W = img_sizes[i]
+            H_tokens, W_tokens = H // pH, W // pW
+            assert H_tokens * W_tokens == img_len
+
+            position_ids[i, :cap_len, 0] = torch.arange(cap_len, dtype=torch.int32, device=device)
+            position_ids[i, cap_len:cap_len+img_len, 0] = cap_len
+            row_ids = torch.arange(H_tokens, dtype=torch.int32, device=device).view(-1, 1).repeat(1, W_tokens).flatten()
+            col_ids = torch.arange(W_tokens, dtype=torch.int32, device=device).view(1, -1).repeat(H_tokens, 1).flatten()
+            position_ids[i, cap_len:cap_len+img_len, 1] = row_ids
+            position_ids[i, cap_len:cap_len+img_len, 2] = col_ids
+
+        freqs_cis = self.rope_embedder(position_ids)
+
+        # build freqs_cis for cap and image individually
+        cap_freqs_cis_shape = list(freqs_cis.shape)
+        # cap_freqs_cis_shape[1] = max_cap_len
+        cap_freqs_cis_shape[1] = cap_feats.shape[1]
+        cap_freqs_cis = torch.zeros(*cap_freqs_cis_shape, device=device, dtype=freqs_cis.dtype)
+
+        img_freqs_cis_shape = list(freqs_cis.shape)
+        img_freqs_cis_shape[1] = max_img_len
+        img_freqs_cis = torch.zeros(*img_freqs_cis_shape, device=device, dtype=freqs_cis.dtype)
+
+        for i in range(bsz):
+            cap_len = l_effective_cap_len[i]
+            img_len = l_effective_img_len[i]
+            cap_freqs_cis[i, :cap_len] = freqs_cis[i, :cap_len]
+            img_freqs_cis[i, :img_len] = freqs_cis[i, cap_len:cap_len+img_len]
+
+        # refine context
+        for layer in self.context_refiner:
+            cap_feats = layer(cap_feats, cap_mask, cap_freqs_cis)
+
+        # refine image
+        flat_x = []
+        for i in range(bsz):
+            img = x[i]
+            C, H, W = img.size()
+            img = img.view(C, H // pH, pH, W // pW, pW).permute(1, 3, 2, 4, 0).flatten(2).flatten(0, 1)
+            flat_x.append(img)
+        x = flat_x
+        padded_img_embed = torch.zeros(bsz, max_img_len, x[0].shape[-1], device=device, dtype=x[0].dtype)
+        padded_img_mask = torch.zeros(bsz, max_img_len, dtype=torch.bool, device=device)
+        for i in range(bsz):
+            padded_img_embed[i, :l_effective_img_len[i]] = x[i]
+            padded_img_mask[i, :l_effective_img_len[i]] = True
+
+        padded_img_embed = self.x_embedder(padded_img_embed)
+        for layer in self.noise_refiner:
+            padded_img_embed = layer(padded_img_embed, padded_img_mask, img_freqs_cis, t)
+
+        mask = torch.zeros(bsz, max_seq_len, dtype=torch.bool, device=device)
+        padded_full_embed = torch.zeros(bsz, max_seq_len, self.dim, device=device, dtype=x[0].dtype)
+        for i in range(bsz):
+            cap_len = l_effective_cap_len[i]
+            img_len = l_effective_img_len[i]
+
+            mask[i, :cap_len+img_len] = True
+            padded_full_embed[i, :cap_len] = cap_feats[i, :cap_len]
+            padded_full_embed[i, cap_len:cap_len+img_len] = padded_img_embed[i, :img_len]
+
+        return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
+
 
     def forward(self, x, t, cap_feats, cap_mask):
-        """ Forward pass of NextDiT. """
-        B, C, H, W = x.shape
-        ps = self.patch_size
-        patches_unf = F.unfold(x, kernel_size=ps, stride=ps)
-        patches = patches_unf.transpose(1, 2).contiguous()
-        B, L, _ = patches.shape
-        s = self.encoder(patches)
-        x = s.view(B, -1, H // self.patch_size, W // self.patch_size, )
-        t = self.t_embedder(t)
+        """
+        Forward pass of NextDiT.
+        t: (N,) tensor of diffusion timesteps
+        y: (N,) tensor of text tokens/features
+        """
+
+        # import torch.distributed as dist
+        # if not dist.is_initialized() or dist.get_rank() == 0:
+        #     import pdb
+        #     pdb.set_trace()
+            # torch.save([x, t, cap_feats, cap_mask], "./fake_input.pt")
+        t = self.t_embedder(t)  # (N, D)
         adaln_input = t
-        cap_feats = self.cap_embedder(cap_feats)
+
+        cap_feats = self.cap_embedder(cap_feats)  # (N, L, D)  # todo check if able to batchify w.o. redundant compute
+
         x_is_tensor = isinstance(x, torch.Tensor)
-        x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(
-            x, cap_feats, cap_mask, t
-        )
+        x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(x, cap_feats, cap_mask, t)
         freqs_cis = freqs_cis.to(x.device)
 
-        n_layers = len(self.layers)
-        dropped_info = None
+        for layer in self.layers:
+            x = layer(x, mask, freqs_cis, adaln_input)
 
-        for i, layer in enumerate(self.layers):
-            use_rope = (i % 2 == 0)
-            # At layer 1, if training, randomly drop 50% of tokens and store them.
-            if self.training and i == 1 and n_layers >= 4:
-                B, N, _ = x.shape
-                n_tokens_to_keep = N // 2
-
-                # Generate a unique random permutation for each batch element
-                perm = torch.stack([torch.randperm(N, device=x.device) for _ in range(B)])
-
-                keep_indices = perm[:, :n_tokens_to_keep]
-                drop_indices = perm[:, n_tokens_to_keep:]
-
-                # Sort indices to ensure correct order when using scatter
-                keep_indices, _ = torch.sort(keep_indices, dim=1)
-                drop_indices, _ = torch.sort(drop_indices, dim=1)
-
-                # Store the dropped tensors and their original indices
-                dropped_x = torch.gather(x, 1, drop_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
-                dropped_mask = torch.gather(mask, 1, drop_indices)
-                dropped_freqs_cis = torch.gather(freqs_cis, 1,
-                                                 drop_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]))
-                dropped_info = (dropped_x, dropped_mask, dropped_freqs_cis, keep_indices, drop_indices)
-
-                # Overwrite tensors with the kept tokens for subsequent layers
-                x = torch.gather(x, 1, keep_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
-                mask = torch.gather(mask, 1, keep_indices)
-                freqs_cis = torch.gather(freqs_cis, 1, keep_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]))
-
-            # At the second-to-last layer, reintroduce the dropped tokens
-            if self.training and i == n_layers - 2 and dropped_info is not None:
-                dropped_x, dropped_mask, dropped_freqs_cis, keep_indices, drop_indices = dropped_info
-
-                N_orig = keep_indices.shape[1] + drop_indices.shape[1]
-
-                # Create empty tensors with the original sequence length
-                full_x = torch.empty((x.shape[0], N_orig, x.shape[-1]), dtype=x.dtype, device=x.device)
-                full_mask = torch.empty((mask.shape[0], N_orig), dtype=mask.dtype, device=mask.device)
-                full_freqs_cis = torch.empty((freqs_cis.shape[0], N_orig, freqs_cis.shape[-1]), dtype=freqs_cis.dtype,
-                                             device=freqs_cis.device)
-
-                # Use scatter to reassemble the tensors in their original positions
-                full_x.scatter_(1, keep_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]), x)
-                full_x.scatter_(1, drop_indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]), dropped_x)
-
-                full_mask.scatter_(1, keep_indices, mask)
-                full_mask.scatter_(1, drop_indices, dropped_mask)
-
-                full_freqs_cis.scatter_(1, keep_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]), freqs_cis)
-                full_freqs_cis.scatter_(1, drop_indices.unsqueeze(-1).expand(-1, -1, freqs_cis.shape[-1]),
-                                        dropped_freqs_cis)
-
-                x, mask, freqs_cis = full_x, full_mask, full_freqs_cis
-                dropped_info = None  # Clear the stored information
-            if not use_rope:
-                # pass identity tensor to disable rotation
-                freqs = None
-            else:
-                freqs = freqs_cis
-
-            # --- Original layer processing ---
-            if self.training:
-                x = ckpt.checkpoint(layer, x, mask, freqs, adaln_input, use_reentrant=False)
-            else:
-                x = layer(x, mask, freqs, adaln_input)
-        # --- MODIFICATION END ---
         x = self.final_layer(x, adaln_input)
         x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)
-        x = x.flatten(2,3).transpose(1, 2)
-        patch_pixels = patches.view(B, L, C, ps * ps).permute(0, 1, 3, 2).contiguous()
-        tokens = patch_pixels.view(B * L, ps * ps, C)
-        tokens = self.token_embedder(tokens)
-        s_flat = s.view(B * L, -1)
-        for block in self.nerf_blocks:
-            tokens = ckpt.checkpoint(block, tokens, s_flat, use_reentrant = False)  # [B*L, N, hidden_x]
-        out_tokens = self.final(tokens)  # [B*L, N, C]
-        out_patch_pixels = out_tokens.view(B, L, ps * ps, C).permute(0, 1, 3, 2).contiguous()
-        out_unf = out_patch_pixels.view(B, L, C * ps * ps).transpose(1, 2).contiguous()
-        out = F.fold(out_unf, output_size=(H, W), kernel_size=ps, stride=ps)
-        return out
+
+        return x
 
     def forward_with_cfg(
-            self,
-            x,
-            t,
-            cap_feats,
-            cap_mask,
-            cfg_scale,
-            cfg_trunc=100,
-            renorm_cfg=1
+        self,
+        x,
+        t,
+        cap_feats,
+        cap_mask,
+        cfg_scale,
+        cfg_trunc=100,
+        renorm_cfg=1
     ):
-
         """
         Forward pass of NextDiT, but also batches the unconditional forward pass
         for classifier-free guidance.
@@ -988,60 +840,110 @@ class Lumina(nn.Module):
 
         output = torch.cat([half_eps, half_eps], dim=0)
         return output
-    def parameter_count(self, trainable_only=True):
-        if trainable_only:
-            return sum(p.numel() for p in self.parameters() if p.requires_grad)
-        return sum(p.numel() for p in self.parameters())
+
+    @staticmethod
+    def precompute_freqs_cis(
+        dim: List[int],
+        end: List[int],
+        theta: float = 10000.0,
+    ):
+        """
+        Precompute the frequency tensor for complex exponentials (cis) with
+        given dimensions.
+
+        This function calculates a frequency tensor with complex exponentials
+        using the given dimension 'dim' and the end index 'end'. The 'theta'
+        parameter scales the frequencies. The returned tensor contains complex
+        values in complex64 data type.
+
+        Args:
+            dim (list): Dimension of the frequency tensor.
+            end (list): End index for precomputing frequencies.
+            theta (float, optional): Scaling factor for frequency computation.
+                Defaults to 10000.0.
+
+        Returns:
+            torch.Tensor: Precomputed frequency tensor with complex
+                exponentials.
+        """
+        freqs_cis = []
+        for i, (d, e) in enumerate(zip(dim, end)):
+            freqs = 1.0 / (theta ** (torch.arange(0, d, 2, dtype=torch.float64, device="cpu") / d))
+            timestep = torch.arange(e, device=freqs.device, dtype=torch.float64)
+            freqs = torch.outer(timestep, freqs).float()
+            freqs_cis_i = torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64)  # complex64
+            freqs_cis.append(freqs_cis_i)
+
+        return freqs_cis
+
+    def parameter_count(self) -> int:
+        total_params = 0
+
+        def _recursive_count_params(module):
+            nonlocal total_params
+            for param in module.parameters(recurse=False):
+                total_params += param.numel()
+            for submodule in module.children():
+                _recursive_count_params(submodule)
+
+        _recursive_count_params(self)
+        return total_params
+
+    def get_fsdp_wrap_module_list(self) -> List[nn.Module]:
+        return list(self.layers)
+
+    def get_checkpointing_wrap_module_list(self) -> List[nn.Module]:
+        return list(self.layers)
 
 
-def Lumina_2b(**kwargs):
-    return Lumina(
-        patch_size=16,
-        in_channels=3,
-        dim=768,
-        n_layers=12,
-        n_heads=8,
-        n_kv_heads=4,
+#############################################################################
+#                                 NextDiT Configs                               #
+#############################################################################
+
+def NextDiT_2B_GQA_patch2_Adaln_Refiner(**kwargs):
+    return NextDiT(
+        patch_size=2,
+        dim=2304,
+        n_layers=26,
+        n_heads=24,
+        n_kv_heads=8,
         axes_dims=[32, 32, 32],
         axes_lens=[300, 512, 512],
-        qk_norm=True,
-        cap_feat_dim=640,
+        **kwargs
+    )
+
+def NextDiT_3B_GQA_patch2_Adaln_Refiner(**kwargs):
+    return NextDiT(
+        patch_size=2,
+        dim=2592,
+        n_layers=30,
+        n_heads=24,
+        n_kv_heads=8,
+        axes_dims=[36, 36, 36],
+        axes_lens=[300, 512, 512],
         **kwargs,
     )
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+def NextDiT_4B_GQA_patch2_Adaln_Refiner(**kwargs):
+    return NextDiT(
+        patch_size=2,
+        dim=2880,
+        n_layers=32,
+        n_heads=24,
+        n_kv_heads=8,
+        axes_dims=[40, 40, 40],
+        axes_lens=[300, 512, 512],
+        **kwargs,
+    )
 
-if __name__ == "__main__":
-    torch.manual_seed(42)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Create model and move to device
-    model = Lumina_2b(n_refiner_layers=2).to(device)
-    model.train()
-    print(f"Model parameters: {count_parameters(model)/1e6:.2f}M")
-
-    # Dummy input
-    batch_size = 2
-    C, H, W = 3, 256, 256  # in_channels=16 and H, W should be divisible by patch_size=2
-    cap_len = 40
-    cap_feat_dim = 640
-
-    # Create dummy inputs
-    x = torch.randn(batch_size, C, H, W, device=device, requires_grad=True)
-    t = torch.randint(0, 1000, (batch_size,), device=device)  # scalar timesteps
-    cap_feats = torch.randn(batch_size, cap_len, cap_feat_dim, device=device)
-    cap_mask = torch.ones(batch_size, cap_len, dtype=torch.bool, device=device)
-
-    # Forward pass
-    output = model(x, t, cap_feats, cap_mask)
-    print(f"Output shape: {output.shape}")  # Should be (B, C, H, W)
-
-    # Dummy loss
-    target = torch.randn_like(output)
-    loss = F.mse_loss(output, target)
-    print(f"Loss: {loss.item():.4f}")
-
-    # Backward pass
-    loss.backward()
-    print("Backward pass successful.")
+def NextDiT_7B_GQA_patch2_Adaln_Refiner(**kwargs):
+    return NextDiT(
+        patch_size=2,
+        dim=3840,
+        n_layers=32,
+        n_heads=32,
+        n_kv_heads=8,
+        axes_dims=[40, 40, 40],
+        axes_lens=[300, 512, 512],
+        **kwargs,
+    )
