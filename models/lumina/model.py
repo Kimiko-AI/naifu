@@ -904,7 +904,7 @@ def NextDiT_2B_GQA_patch2_Adaln_Refiner(**kwargs):
     return NextDiT(
         patch_size=2,
         dim=2304,
-        n_layers=26,
+        n_layers=4,
         n_heads=24,
         n_kv_heads=8,
         axes_dims=[32, 32, 32],
