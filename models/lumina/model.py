@@ -552,7 +552,7 @@ class NextDiT(nn.Module):
     def __init__(
         self,
         patch_size: int = 2,
-        in_channels: int = 4,
+        in_channels: int = 16,
         dim: int = 4096,
         n_layers: int = 32,
         n_refiner_layers: int = 2,
