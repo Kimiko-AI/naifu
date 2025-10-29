@@ -562,7 +562,7 @@ class NextDiT(nn.Module):
         ffn_dim_multiplier: Optional[float] = None,
         norm_eps: float = 1e-5,
         qk_norm: bool = False,
-        cap_feat_dim: int = 5120,
+        cap_feat_dim: int = 640,
         axes_dims: List[int] = (16, 56, 56),
         axes_lens: List[int] = (1, 512, 512),
     ) -> None:
