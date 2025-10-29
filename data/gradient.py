@@ -44,7 +44,7 @@ class GradientDataset(Dataset):
 
 
 class TagImageDataset(Dataset):
-    def __init__(self, dataset_path, split="train", image_size=512, batch_size=16):
+    def __init__(self, dataset_path, split="train", image_size=512, batch_size=16, name = ""):
         # Load dataset (either local folder or remote HF dataset)
         self.dataset = load_dataset(dataset_path, split=split)
         self.batch_size = batch_size
