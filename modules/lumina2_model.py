@@ -75,15 +75,15 @@ class Lumina2Model(pl.LightningModule):
 
         # text_encoder
         if self.config.model.get("text_encoder_path", None):
-            self.text_encoder = AutoModel.from_pretrained(
+            self.text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
                 self.config.model.text_encoder_path,
-                torch_dtype=torch.float32
+                torch_dtype=torch.bloat16
             ).cuda()
         else:
             self.text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
                 self.model_path,
                 subfolder="text_encoder",
-                torch_dtype=torch.float32
+                torch_dtype=torch.bloat16
             ).cuda()
 
         logger.info(f"text encoder: {type(self.text_encoder)}")
@@ -276,12 +276,11 @@ class Lumina2Model(pl.LightningModule):
         # 将输入移动到正确的设备并设置数据类型
         text_input_ids = text_inputs.input_ids.to(self.target_device)
         prompt_masks = text_inputs.attention_mask.to(self.target_device)
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            prompt_embeds = text_encoder(
-                input_ids=text_input_ids,
-                attention_mask=prompt_masks,
-                output_hidden_states=True,
-            ).hidden_states
+        prompt_embeds = text_encoder(
+            input_ids=text_input_ids.to(torch.bfloat16),
+            attention_mask=prompt_masks,
+            output_hidden_states=True,
+        ).hidden_states
         prompt_embeds = torch.stack(prompt_embeds, dim=0)
         prompt_embeds = F.normalize(prompt_embeds, p=2, dim=-1).mean(dim=0)
 
