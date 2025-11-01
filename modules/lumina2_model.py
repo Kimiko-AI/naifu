@@ -77,7 +77,7 @@ class Lumina2Model(pl.LightningModule):
         if self.config.model.get("text_encoder_path", None):
             self.text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
                 self.config.model.text_encoder_path,
-                torch_dtype=torch.bloat16
+                torch_dtype=torch.bfloat16
             ).cuda()
         else:
             self.text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
