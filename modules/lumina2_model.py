@@ -32,6 +32,7 @@ from diffusers import (
 from transformers import (
     AutoTokenizer,
     AutoModel,
+    Gemma3ForConditionalGeneration
 )
 from torchvision.transforms.functional import to_pil_image
 
@@ -79,7 +80,7 @@ class Lumina2Model(pl.LightningModule):
                 torch_dtype=torch.float32
             ).cuda()
         else:
-            self.text_encoder = AutoModel.from_pretrained(
+            self.text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
                 self.model_path,
                 subfolder="text_encoder",
                 torch_dtype=torch.float32
