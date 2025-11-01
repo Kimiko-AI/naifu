@@ -219,7 +219,8 @@ class Lumina2Model(pl.LightningModule):
                 subfolder="vae",
                 torch_dtype=torch.float32
             )
-
+        self.vae.config.scaling_factor = 0.3125
+        self.vae.config.shift_factor = 0
         if advanced.get("latents_mean", None):
             self.latents_mean = torch.tensor(advanced.latents_mean)
             self.latents_std = torch.tensor(advanced.latents_std)
@@ -234,6 +235,8 @@ class Lumina2Model(pl.LightningModule):
 
         self.text_encoder.requires_grad_(False)
         self.vae.requires_grad_(False)
+        self.vae.compile()
+
 
         # self.tokenizer.to(self.target_device)
         # self.tokenizer.requires_grad_(False)

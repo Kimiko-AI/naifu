@@ -1,9 +1,8 @@
-target: modules.SFT_Lumina.setup
+target: modules.train_lumina.setup
 adaptive_loss_weight: True
 name: test-run
-
 lightning:
-  precision: "16-mixed"
+  precision: "bf16-true"
 
 trainer:
   model_path: ""
@@ -12,7 +11,7 @@ trainer:
   checkpoint_dir: "checkpoints/lumina_gradient"
   save_every: 1000
   grad_clip: 1.0
-  max_steps: 10000
+  max_steps: 1000000
   seed: 42
   wandb_id: "Lumina_test"
   accumulate_grad_batches: 1
@@ -21,14 +20,14 @@ trainer:
   checkpoint_freq: 1
   save_weights_only: false
   max_epochs: -1
-  auto_resume: false
+  auto_resume: true
   checkpointing: true
 
 
 model:
-  vae_path: "REPA-E/e2e-flux-vae"
-  tokenizer_path: "unsloth/gemma-3-270m-it"
-  text_encoder_path: "unsloth/gemma-3-270m-it"
+  vae_path: "REPA-E/e2e-invae-hf"
+  tokenizer_path: "unsloth/gemma-3-1b-pt"
+  text_encoder_path: "unsloth/gemma-3-1b-pt"
 
 
 
@@ -36,13 +35,13 @@ model:
 dataset:
   name: "data.gradient.TagImageDataset"
   image_size: 256
-  dataset_path: "animetimm/danbooru-wdtagger-v4-w640-ws-50k"
-  batch_size: 16
+  dataset_path: "animetimm/danbooru-wdtagger-v4-w640-ws-1M"
+  batch_size: 32
 
 optimizer:
-  name: "torch.optim.AdamW"
+  name: "timm.optim.Muon"
   params:
-    lr: 1.0e-5
+    lr: 0.005
     weight_decay: 0.01
 
 scheduler:
@@ -63,5 +62,14 @@ sampling:
   every_n_epochs: 1
   prompts:
     - "1girl"
+    - "1girl solo masterpiece best_quality school_uniform seifuku brown_hair medium_hair smiling outdoors park blue_sky day"
+    - "1girl solo fantasy silver_hair long_hair red_eyes pointy_ears elf armor holding_sword standing castle cinematic_lighting"
+    - "1girl solo casual blonde_hair ponytail glasses sweater skirt sitting cafe drinking_coffee indoors window rain"
+    - "1girl solo sci-fi pink_hair twintails cyberpunk neon_city jacket headphones looking_at_viewer night street"
+    - "1girl solo portrait close-up black_hair short_hair freckles serene_expression simple_background light_particles watercolor_(style)"
+    - "1girl solo witch witch_hat purple_hair long_dress holding_staff magical enchanting_forest full_moon night"
+    - "1girl solo full_body white_dress straw_hat running field_of_flowers summer day from_side"
+
+  use_wandb: true
   save_dir: "samples/lumina_gradient"
   seed: 42
