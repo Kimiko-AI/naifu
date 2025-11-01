@@ -31,7 +31,7 @@ from diffusers import (
 
 from transformers import (
     AutoTokenizer,
-    AutoModel,
+    AutoModelForCausalLM,
     Gemma3ForConditionalGeneration
 )
 from torchvision.transforms.functional import to_pil_image
@@ -75,15 +75,15 @@ class Lumina2Model(pl.LightningModule):
 
         # text_encoder
         if self.config.model.get("text_encoder_path", None):
-            self.text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
+            self.text_encoder = AutoModelForCausalLM.from_pretrained(
                 self.config.model.text_encoder_path,
                 torch_dtype=torch.bfloat16
             ).cuda()
         else:
-            self.text_encoder = Gemma3ForConditionalGeneration.from_pretrained(
+            self.text_encoder = AutoModelForCausalLM.from_pretrained(
                 self.model_path,
                 subfolder="text_encoder",
-                torch_dtype=torch.bloat16
+                torch_dtype=torch.bfloat16
             ).cuda()
 
         logger.info(f"text encoder: {type(self.text_encoder)}")
@@ -277,7 +277,7 @@ class Lumina2Model(pl.LightningModule):
         text_input_ids = text_inputs.input_ids.to(self.target_device)
         prompt_masks = text_inputs.attention_mask.to(self.target_device)
         prompt_embeds = text_encoder(
-            input_ids=text_input_ids.to(torch.bfloat16),
+            input_ids=text_input_ids,
             attention_mask=prompt_masks,
             output_hidden_states=True,
         ).hidden_states
