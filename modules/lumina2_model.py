@@ -17,7 +17,7 @@ from common.logging import logger
 import random
 
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    CheckpointImpl,
+        CheckpointImpl,
     apply_activation_checkpointing,
     checkpoint_wrapper,
 )
@@ -192,7 +192,7 @@ class Lumina2Model(pl.LightningModule):
             logger.info("apply gradient checkpointing")
             non_reentrant_wrapper = partial(
                 checkpoint_wrapper,
-                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+                checkpoint_impl=CheckpointImpl.REENTRANT,
             )
             apply_activation_checkpointing(
                 self.model,
