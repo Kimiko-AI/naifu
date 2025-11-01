@@ -3,6 +3,9 @@ adaptive_loss_weight: True
 name: test-run
 lightning:
   precision: "bf16-true"
+  accelerator: "auto"
+  devices: "auto"
+  strategy: "auto"
 
 trainer:
   model_path: ""
@@ -35,7 +38,7 @@ model:
 dataset:
   name: "data.gradient.TagImageDataset"
   image_size: 256
-  dataset_path: "animetimm/danbooru-wdtagger-v4-w640-ws-1M"
+  dataset_path: "/root/ChatError/Dan_dataset"
   batch_size: 32
 
 optimizer:
