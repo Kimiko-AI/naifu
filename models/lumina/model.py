@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from common.logging import logger
-
+from torch.nn import RMSNorm
 def modulate(x, scale):
     return x * (1 + scale.unsqueeze(1))
 
@@ -82,23 +82,7 @@ class TimestepEmbedder(nn.Module):
         return t_emb
 
 
-#############################################################################
-#                               Core NextDiT Model                              #
-#############################################################################
 
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        # x: [B, *, D]
-        norm_x = x.norm(2, -1, keepdim=True)
-        rms_x = norm_x * x.shape[-1] ** (-0.5)
-        x_normed = x / (rms_x + self.eps)
-        return self.weight * x_normed
 
 
 class JointAttention(nn.Module):
@@ -562,7 +546,7 @@ class NextDiT(nn.Module):
         ffn_dim_multiplier: Optional[float] = None,
         norm_eps: float = 1e-5,
         qk_norm: bool = True,
-        cap_feat_dim: int = 640,
+        cap_feat_dim: int = 1152 * 4,
         axes_dims: List[int] = (16, 56, 56),
         axes_lens: List[int] = (1, 512, 512),
     ) -> None:
@@ -903,10 +887,10 @@ class NextDiT(nn.Module):
 def NextDiT_2B_GQA_patch2_Adaln_Refiner(**kwargs):
     return NextDiT(
         patch_size=2,
-        dim=2304,
-        n_layers=4,
-        n_heads=24,
-        n_kv_heads=8,
+        dim=768,
+        n_layers=16,
+        n_heads=8,
+        n_kv_heads=2,
         axes_dims=[32, 32, 32],
         axes_lens=[300, 512, 512],
         **kwargs

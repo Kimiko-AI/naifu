@@ -22,6 +22,7 @@ trainer:
   save_weights_only: false
   max_epochs: -1
   auto_resume: false
+  checkpointing: true
 
 
 model:

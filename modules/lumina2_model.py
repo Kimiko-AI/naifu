@@ -275,12 +275,12 @@ class Lumina2Model(pl.LightningModule):
         # 将输入移动到正确的设备并设置数据类型
         text_input_ids = text_inputs.input_ids.to(self.target_device)
         prompt_masks = text_inputs.attention_mask.to(self.target_device)
-
-        prompt_embeds = text_encoder(
-            input_ids=text_input_ids,
-            attention_mask=prompt_masks,
-            output_hidden_states=True,
-        ).hidden_states
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            prompt_embeds = text_encoder(
+                input_ids=text_input_ids,
+                attention_mask=prompt_masks,
+                output_hidden_states=True,
+            ).hidden_states
         prompt_embeds = torch.stack(prompt_embeds, dim=0)
         prompt_embeds = F.normalize(prompt_embeds, p=2, dim=-1).mean(dim=0)
 
