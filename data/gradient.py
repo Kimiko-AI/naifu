@@ -1,20 +1,22 @@
 import torch
 import numpy as np
-from torch.utils.data import Dataset, DataLoader, Sampler
+from torch.utils.data import Dataset, DataLoader, IterableDataset
 from datasets import load_dataset
 from torchvision import transforms
 from PIL import Image
+from collections import defaultdict
+import random
 
 class GradientDataset(Dataset):
     def __init__(
-        self,
-        width,
-        height,
-        num_batches=100,
-        name="",
-        start_color=(0., 0., 0.),
-        end_color=(1., 1., 0.),
-        batch_size = 16
+            self,
+            width,
+            height,
+            num_batches=100,
+            name="",
+            start_color=(0., 0., 0.),
+            end_color=(1., 1., 0.),
+            batch_size=16
     ):
         self.batch_size = batch_size
         self.width = width
@@ -39,7 +41,7 @@ class GradientDataset(Dataset):
 
     def init_dataloader(self, **kwargs):
         # kwargs can contain batch_size, shuffle, etc.
-        return DataLoader(self, batch_size = self.batch_size, shuffle = True, pin_memory = True, )
+        return DataLoader(self, batch_size=self.batch_size, shuffle=True, pin_memory=True, )
 
 BUCKET_SIZES = [
     (256, 256),
@@ -49,38 +51,27 @@ BUCKET_SIZES = [
     (192, 320),
 ]
 
-
-
-def nearest_bucket(width, height, buckets=BUCKET_SIZES):
-    """Return the (w, h) bucket closest in aspect ratio and area."""
-    aspect = width / height
-    return min(
-        buckets,
-        key=lambda b: abs((b[0] / b[1]) - aspect) + 0.1 * abs((b[0] * b[1]) - (width * height))
-    )
-
-
-class TagImageDataset(Dataset):
-    def __init__(self, dataset_path, split="train", image_size=512, batch_size=16, name=""):
+class TagImageIterableDataset(IterableDataset):
+    def __init__(self, dataset_path, split="train", batch_size=16, name="", shuffle=True):
         self.dataset = load_dataset(dataset_path, split=split)
         self.batch_size = batch_size
+        self.shuffle = shuffle
 
-        # Gather image sizes (width, height)
-        self.sizes = []
-        for sample in self.dataset:
-            img = sample["webp"]
-            if not isinstance(img, Image.Image):
-                img = Image.open(img)
-            self.sizes.append(img.size)
-            img.close()
+        self.buckets = BUCKET_SIZES
+        self.bucket_ratios = [w / h for w, h in self.buckets]
+        self.base_transform = transforms.Compose([transforms.ToTensor()])
+        self.is_streaming = False
 
-        self.base_transform = transforms.ToTensor()
+    def assign_bucket(self, width, height):
+        ratio = width / height
+        return min(range(len(self.bucket_ratios)),
+                   key=lambda i: abs(self.bucket_ratios[i] - ratio))
 
-    def __len__(self):
-        return len(self.dataset)
+    def resize_to_bucket(self, image, bucket_idx):
+        target_w, target_h = self.buckets[bucket_idx]
+        return image.resize((target_w, target_h), Image.BICUBIC)
 
-    def __getitem__(self, idx):
-        sample = self.dataset[idx]
+    def preprocess_sample(self, sample):
         json_data = sample["json"]
         rating = json_data.get("rating", "")
         character_tags = json_data.get("character_tags", [])
@@ -91,56 +82,49 @@ class TagImageDataset(Dataset):
         image = sample["webp"]
         if not isinstance(image, Image.Image):
             image = Image.open(image).convert("RGB")
-
-        return image, tag_str, self.sizes[idx]
-
-    # -------------------------------
-    # Batch sampler and dataloader
-    # -------------------------------
-    def init_dataloader(self, **kwargs):
-        sampler = BucketBatchSampler(self, batch_size=self.batch_size)
-        return DataLoader(
-            self,
-            batch_sampler=sampler,
-            collate_fn=self.bucket_collate_fn,
-            pin_memory=True,
-            **kwargs,
-        )
-
-    @staticmethod
-    def bucket_collate_fn(batch):
-        """Resize batch to its bucket size and stack tensors."""
-        images, tags, sizes = zip(*batch)
-        # Pick the first sample's bucket (all in same bucket)
-        target_bucket = nearest_bucket(*sizes[0])
-        resize = transforms.Resize(target_bucket[::-1])  # (h, w)
-        tensor_images = torch.stack([transforms.ToTensor()(resize(img)) for img in images])
-        return {"pixels": tensor_images, "prompts": list(tags)}
-
-
-class BucketBatchSampler(Sampler):
-    """Groups dataset indices by similar-size bucket."""
-    def __init__(self, dataset, batch_size=16):
-        self.batch_size = batch_size
-        self.buckets = {b: [] for b in BUCKET_SIZES}
-
-        # Assign indices to buckets
-        for idx, (w, h) in enumerate(dataset.sizes):
-            bucket = nearest_bucket(w, h)
-            self.buckets[bucket].append(idx)
-
-        # Prepare batches grouped by bucket
-        self.batches = []
-        for b, idxs in self.buckets.items():
-            for i in range(0, len(idxs), batch_size):
-                self.batches.append(idxs[i:i + batch_size])
+        return image, tag_str
 
     def __iter__(self):
-        # Optional shuffle for randomness
-        torch.random.manual_seed(torch.randint(0, 2**31, (1,)).item())
-        shuffled_batches = torch.randperm(len(self.batches)).tolist()
-        for b_idx in shuffled_batches:
-            yield self.batches[b_idx]
+        # Create iterable over samples
+        if self.is_streaming:
+            dataset_iter = iter(self.dataset.shuffle(buffer_size=1000, seed=random.randint(0, 1e6))) if self.shuffle else iter(self.dataset)
+        else:
+            indices = list(range(len(self.dataset)))
+            if self.shuffle:
+                random.shuffle(indices)
+            dataset_iter = (self.dataset[i] for i in indices)
 
-    def __len__(self):
-        return len(self.batches)
+        # Initialize bucket accumulators
+        bucket_batches = [[] for _ in self.buckets]
+
+        for sample in dataset_iter:
+            try:
+                image, tag_str = self.preprocess_sample(sample)
+                w, h = image.size
+                bucket_idx = self.assign_bucket(w, h)
+                image = self.resize_to_bucket(image, bucket_idx)
+                image_tensor = self.base_transform(image)
+
+                bucket_batches[bucket_idx].append({
+                    "pixels": image_tensor,
+                    "prompts": tag_str
+                })
+
+                if len(bucket_batches[bucket_idx]) >= self.batch_size:
+                    batch = bucket_batches[bucket_idx]
+                    pixels = torch.stack([x["pixels"] for x in batch])
+                    prompts = [x["prompts"] for x in batch]
+                    yield {"pixels": pixels, "prompts": prompts}
+                    bucket_batches[bucket_idx] = []
+            except Exception as e:
+                print(f"Skipping sample due to error: {e}")
+                continue
+
+    def init_dataloader(self, **kwargs):
+        return DataLoader(
+            self,
+            batch_size=None,
+            pin_memory=True,
+            num_workers=0,
+            **kwargs,
+        )

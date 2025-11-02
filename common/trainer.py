@@ -242,10 +242,10 @@ class Trainer:
         self.prepare_logger()
         loss_rec = LossRecorder()
         progress  = ProgressBar(
-            total=len(self.dataloader) // config.trainer.accumulate_grad_batches,
+            total=1000000 // config.trainer.accumulate_grad_batches,
             disable=not fabric.is_global_zero,
         )
-        assert len(self.dataloader) > 0, "Dataloader is empty"
+        #assert len(self.dataloader) > 0, "Dataloader is empty"
         
         steps_per_epoch = len(self.dataloader) // config.trainer.accumulate_grad_batches
         resume_epoch = self.global_step // steps_per_epoch
@@ -305,7 +305,7 @@ class Trainer:
 
                 if self.scheduler is not None:
                     is_transformers_sch = "transformers" in config.scheduler.name
-                    fp_batch = self.current_epoch + batch_idx / len(self.dataloader)
+                    fp_batch = self.current_epoch + batch_idx / config.trainer.max_steps
                     actual_step = self.global_step if is_transformers_sch else fp_batch
                     self.scheduler.step(actual_step)
 
