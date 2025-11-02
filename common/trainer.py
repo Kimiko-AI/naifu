@@ -311,14 +311,14 @@ class Trainer:
                 if is_accumulating:
                     continue
 
-                if grad_clip_val > 0:
-                    grad_norm = self.fabric.clip_gradients(
-                        module=fabric_module,
-                        optimizer=self.optimizer,
-                        max_norm=grad_clip_val
-                    )
-                    if grad_norm is not None:
-                        metrics["train/grad_norm"] = grad_norm
+                #if grad_clip_val > 0:
+                #    grad_norm = self.fabric.clip_gradients(
+                #        module=fabric_module,
+                #        optimizer=self.optimizer,
+                #        max_norm=grad_clip_val
+                #    )
+                #    if grad_norm is not None:
+                #        metrics["train/grad_norm"] = grad_norm
 
                 if self.optimizer is not None:
                     self.optimizer.step()
