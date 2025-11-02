@@ -108,3 +108,11 @@ class TagImageIterableDataset(IterableDataset):
 
             if not self.repeat:
                 break
+    def init_dataloader(self, **kwargs):
+        return DataLoader(
+            self,
+            batch_size=None,  # Batching handled in __iter__
+            pin_memory=True,
+            num_workers=8,
+            **kwargs,
+        )
