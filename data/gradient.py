@@ -64,6 +64,48 @@ class TagImageIterableDataset(IterableDataset):
 
         self.is_streaming = getattr(self.dataset, "is_streaming", False)
 
+    def assign_bucket(self, width, height):
+        ratio = width / height
+        return min(range(len(self.bucket_ratios)),
+                   key=lambda i: abs(self.bucket_ratios[i] - ratio))
+
+    def resize_to_bucket(self, image, bucket_idx):
+        target_w, target_h = self.buckets[bucket_idx]
+        return image.resize((target_w, target_h), Image.BICUBIC)
+
+    def preprocess_sample(self, sample):
+        json_data = sample["json"]
+        rating = json_data.get("rating", "")
+        character_tags = json_data.get("character_tags", [])
+        general_tags = json_data.get("general_tags", [])
+        all_tags = [rating] + character_tags + general_tags
+        tag_str = " ".join(map(str, all_tags))[:512]
+
+        image = sample["webp"]
+        if not isinstance(image, Image.Image):
+            image = Image.open(image).convert("RGB")
+        return image, tag_str
+
+    def get_sample_indices(self):
+        """Generate the sequence of indices this worker should handle."""
+        worker_info = get_worker_info()
+        dataset_len = len(self.dataset)
+
+        if worker_info is None:
+            # Single-process loading
+            start, end = 0, dataset_len
+        else:
+            # Split dataset across workers
+            per_worker = dataset_len // worker_info.num_workers
+            start = worker_info.id * per_worker
+            # Last worker takes the remainder
+            end = dataset_len if worker_info.id == worker_info.num_workers - 1 else start + per_worker
+
+        indices = list(range(start, end))
+        if self.shuffle:
+            random.shuffle(indices)
+        return indices
+
     def _make_iter(self):
         """Return a fresh iterator over samples (shuffled if needed)."""
         if self.is_streaming:
@@ -108,6 +150,7 @@ class TagImageIterableDataset(IterableDataset):
 
             if not self.repeat:
                 break
+
     def init_dataloader(self, **kwargs):
         return DataLoader(
             self,
