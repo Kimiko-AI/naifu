@@ -300,22 +300,8 @@ class Lumina2Model(pl.LightningModule):
     @torch.no_grad()
     def encode_images(self, images):
         # VAE编码图像
-        vae_scale = {
-            "sdxl": 0.13025,
-            "sd3": 1.5305,
-            "ema": 0.18215,
-            "mse": 0.18215,
-            "cogvideox": 1.15258426,
-            "flux": 0.3611,
-        }["flux"]
-        vae_shift = {
-            "sdxl": 0.0,
-            "sd3": 0.0609,
-            "ema": 0.0,
-            "mse": 0.0,
-            "cogvideox": 0.0,
-            "flux": 0.1159,
-        }["flux"]
+        vae_scale = 0.3125
+        vae_shift = 0
 
         x = [img.to(self.target_device, non_blocking=True) for img in images]
 
@@ -548,7 +534,7 @@ class Lumina2Model(pl.LightningModule):
 
                 # 设置latent的尺寸
                 w, h = size
-                latent_w, latent_h = int(w // 8), int(h // 8)
+                latent_w, latent_h = int(w // 16), int(h // 16)
 
                 # 修复 generator 设备问题
                 if generator is not None:
