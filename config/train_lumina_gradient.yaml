@@ -50,7 +50,7 @@ optimizer:
 scheduler:
   name: "torch.optim.lr_scheduler.CosineAnnealingLR"
   params:
-    T_max: 10000
+    T_max: 1000000
 
 advanced:
   train_text_encoder: False

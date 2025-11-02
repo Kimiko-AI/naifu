@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from torch.utils.data import Dataset, DataLoader, IterableDataset
+from torch.utils.data import Dataset, DataLoader, IterableDataset, get_worker_info
 from datasets import load_dataset
 from torchvision import transforms
 from PIL import Image
@@ -42,7 +42,6 @@ class GradientDataset(Dataset):
     def init_dataloader(self, **kwargs):
         # kwargs can contain batch_size, shuffle, etc.
         return DataLoader(self, batch_size=self.batch_size, shuffle=True, pin_memory=True, )
-
 BUCKET_SIZES = [
     (256, 256),
     (224, 288),
@@ -51,16 +50,20 @@ BUCKET_SIZES = [
     (192, 320),
 ]
 
+
 class TagImageIterableDataset(IterableDataset):
     def __init__(self, dataset_path, split="train", batch_size=16, name="", shuffle=True):
         self.dataset = load_dataset(dataset_path, split=split)
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.name = name
 
         self.buckets = BUCKET_SIZES
         self.bucket_ratios = [w / h for w, h in self.buckets]
         self.base_transform = transforms.Compose([transforms.ToTensor()])
-        self.is_streaming = False
+
+        # Set this to True if using streaming datasets
+        self.is_streaming = getattr(self.dataset, "is_streaming", False)
 
     def assign_bucket(self, width, height):
         ratio = width / height
@@ -84,17 +87,35 @@ class TagImageIterableDataset(IterableDataset):
             image = Image.open(image).convert("RGB")
         return image, tag_str
 
+    def get_sample_indices(self):
+        """Generate the sequence of indices this worker should handle."""
+        worker_info = get_worker_info()
+        dataset_len = len(self.dataset)
+
+        if worker_info is None:
+            # Single-process loading
+            start, end = 0, dataset_len
+        else:
+            # Split dataset across workers
+            per_worker = dataset_len // worker_info.num_workers
+            start = worker_info.id * per_worker
+            # Last worker takes the remainder
+            end = dataset_len if worker_info.id == worker_info.num_workers - 1 else start + per_worker
+
+        indices = list(range(start, end))
+        if self.shuffle:
+            random.shuffle(indices)
+        return indices
+
     def __iter__(self):
-        # Create iterable over samples
         if self.is_streaming:
+            # Streaming mode: dataset already yields samples lazily
             dataset_iter = iter(self.dataset.shuffle(buffer_size=1000, seed=random.randint(0, 1e6))) if self.shuffle else iter(self.dataset)
         else:
-            indices = list(range(len(self.dataset)))
-            if self.shuffle:
-                random.shuffle(indices)
+            # Non-streaming: generate sample indices per worker
+            indices = self.get_sample_indices()
             dataset_iter = (self.dataset[i] for i in indices)
 
-        # Initialize bucket accumulators
         bucket_batches = [[] for _ in self.buckets]
 
         for sample in dataset_iter:
@@ -117,14 +138,14 @@ class TagImageIterableDataset(IterableDataset):
                     yield {"pixels": pixels, "prompts": prompts}
                     bucket_batches[bucket_idx] = []
             except Exception as e:
-                print(f"Skipping sample due to error: {e}")
+                print(f"[{self.name}] Skipping sample due to error: {e}")
                 continue
 
     def init_dataloader(self, **kwargs):
         return DataLoader(
             self,
-            batch_size=None,
+            batch_size=None,  # Batching handled in __iter__
             pin_memory=True,
-            num_workers=0,
+            num_workers=8,
             **kwargs,
         )
