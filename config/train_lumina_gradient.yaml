@@ -5,7 +5,7 @@ lightning:
   precision: "bf16-true"
   accelerator: "auto"
   devices: "auto"
-  strategy: "deepspeed_stage_2"
+  strategy: "ddp_find_unused_parameters_true"
 
 trainer:
   model_path: ""
@@ -13,7 +13,7 @@ trainer:
   batch_size: 1
   checkpoint_dir: "checkpoints/lumina_gradient"
   save_every: 1000
-  grad_clip: 1.0
+  grad_clip: 20
   max_steps: 800000
   seed: 42
   wandb_id: "Lumina_test"
@@ -64,14 +64,12 @@ sampling:
   every_n_steps: 1000
   every_n_epochs: 1
   prompts:
-    - "1girl"
     - "1girl solo masterpiece best_quality school_uniform seifuku brown_hair medium_hair smiling outdoors park blue_sky day"
     - "1girl solo fantasy silver_hair long_hair red_eyes pointy_ears elf armor holding_sword standing castle cinematic_lighting"
     - "1girl solo casual blonde_hair ponytail glasses sweater skirt sitting cafe drinking_coffee indoors window rain"
     - "1girl solo sci-fi pink_hair twintails cyberpunk neon_city jacket headphones looking_at_viewer night street"
     - "1girl solo portrait close-up black_hair short_hair freckles serene_expression simple_background light_particles watercolor_(style)"
     - "1girl solo witch witch_hat purple_hair long_dress holding_staff magical enchanting_forest full_moon night"
-    - "1girl solo full_body white_dress straw_hat running field_of_flowers summer day from_side"
 
   use_wandb: true
   save_dir: "samples/lumina_gradient"
