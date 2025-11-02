@@ -39,6 +39,7 @@ def setup(fabric: pl.Fabric, config: OmegaConf) -> tuple:
     if config.trainer.get("resume"):
         latest_ckpt = get_latest_checkpoint(config.trainer.checkpoint_dir)
         remainder = {}
+        print("Resuming from checkpoint {}".format(latest_ckpt))
         if latest_ckpt:
             logger.info(f"Loading weights from {latest_ckpt}")
             remainder = sd = load_torch_file(ckpt=latest_ckpt, extract=False)
