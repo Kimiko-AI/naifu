@@ -175,5 +175,4 @@ def get_latest_checkpoint(checkpoint_dir: str):
     items = [x for x in items if "_optimizer" not in x]
     if not items:
         return None
-    print(items[-1])
     return os.path.join(checkpoint_dir, items[-1])
