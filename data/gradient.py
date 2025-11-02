@@ -52,100 +52,59 @@ BUCKET_SIZES = [
 
 
 class TagImageIterableDataset(IterableDataset):
-    def __init__(self, dataset_path, split="train", batch_size=16, name="", shuffle=True):
+    def __init__(self, dataset_path, split="train", batch_size=16, name="", shuffle=True, repeat=True):
         self.dataset = load_dataset(dataset_path, split=split)
         self.batch_size = batch_size
         self.shuffle = shuffle
-        self.name = name
+        self.repeat = repeat
 
         self.buckets = BUCKET_SIZES
         self.bucket_ratios = [w / h for w, h in self.buckets]
         self.base_transform = transforms.Compose([transforms.ToTensor()])
 
-        # Set this to True if using streaming datasets
         self.is_streaming = getattr(self.dataset, "is_streaming", False)
 
-    def assign_bucket(self, width, height):
-        ratio = width / height
-        return min(range(len(self.bucket_ratios)),
-                   key=lambda i: abs(self.bucket_ratios[i] - ratio))
-
-    def resize_to_bucket(self, image, bucket_idx):
-        target_w, target_h = self.buckets[bucket_idx]
-        return image.resize((target_w, target_h), Image.BICUBIC)
-
-    def preprocess_sample(self, sample):
-        json_data = sample["json"]
-        rating = json_data.get("rating", "")
-        character_tags = json_data.get("character_tags", [])
-        general_tags = json_data.get("general_tags", [])
-        all_tags = [rating] + character_tags + general_tags
-        tag_str = " ".join(map(str, all_tags))[:512]
-
-        image = sample["webp"]
-        if not isinstance(image, Image.Image):
-            image = Image.open(image).convert("RGB")
-        return image, tag_str
-
-    def get_sample_indices(self):
-        """Generate the sequence of indices this worker should handle."""
-        worker_info = get_worker_info()
-        dataset_len = len(self.dataset)
-
-        if worker_info is None:
-            # Single-process loading
-            start, end = 0, dataset_len
+    def _make_iter(self):
+        """Return a fresh iterator over samples (shuffled if needed)."""
+        if self.is_streaming:
+            if self.shuffle:
+                return iter(self.dataset.shuffle(buffer_size=1000, seed=random.randint(0, 1e6)))
+            else:
+                return iter(self.dataset)
         else:
-            # Split dataset across workers
-            per_worker = dataset_len // worker_info.num_workers
-            start = worker_info.id * per_worker
-            # Last worker takes the remainder
-            end = dataset_len if worker_info.id == worker_info.num_workers - 1 else start + per_worker
-
-        indices = list(range(start, end))
-        if self.shuffle:
-            random.shuffle(indices)
-        return indices
+            indices = list(range(len(self.dataset)))
+            if self.shuffle:
+                random.shuffle(indices)
+            return (self.dataset[i] for i in indices)
 
     def __iter__(self):
-        if self.is_streaming:
-            # Streaming mode: dataset already yields samples lazily
-            dataset_iter = iter(self.dataset.shuffle(buffer_size=1000, seed=random.randint(0, 1e6))) if self.shuffle else iter(self.dataset)
-        else:
-            # Non-streaming: generate sample indices per worker
-            indices = self.get_sample_indices()
-            dataset_iter = (self.dataset[i] for i in indices)
-
         bucket_batches = [[] for _ in self.buckets]
 
-        for sample in dataset_iter:
-            try:
-                image, tag_str = self.preprocess_sample(sample)
-                w, h = image.size
-                bucket_idx = self.assign_bucket(w, h)
-                image = self.resize_to_bucket(image, bucket_idx)
-                image_tensor = self.base_transform(image)
+        while True:
+            dataset_iter = self._make_iter()
 
-                bucket_batches[bucket_idx].append({
-                    "pixels": image_tensor,
-                    "prompts": tag_str
-                })
+            for sample in dataset_iter:
+                try:
+                    image, tag_str = self.preprocess_sample(sample)
+                    w, h = image.size
+                    bucket_idx = self.assign_bucket(w, h)
+                    image = self.resize_to_bucket(image, bucket_idx)
+                    image_tensor = self.base_transform(image)
 
-                if len(bucket_batches[bucket_idx]) >= self.batch_size:
-                    batch = bucket_batches[bucket_idx]
-                    pixels = torch.stack([x["pixels"] for x in batch])
-                    prompts = [x["prompts"] for x in batch]
-                    yield {"pixels": pixels, "prompts": prompts}
-                    bucket_batches[bucket_idx] = []
-            except Exception as e:
-                print(f"[{self.name}] Skipping sample due to error: {e}")
-                continue
+                    bucket_batches[bucket_idx].append({
+                        "pixels": image_tensor,
+                        "prompts": tag_str
+                    })
 
-    def init_dataloader(self, **kwargs):
-        return DataLoader(
-            self,
-            batch_size=None,  # Batching handled in __iter__
-            pin_memory=True,
-            num_workers=8,
-            **kwargs,
-        )
+                    if len(bucket_batches[bucket_idx]) >= self.batch_size:
+                        batch = bucket_batches[bucket_idx]
+                        pixels = torch.stack([x["pixels"] for x in batch])
+                        prompts = [x["prompts"] for x in batch]
+                        yield {"pixels": pixels, "prompts": prompts}
+                        bucket_batches[bucket_idx] = []
+                except Exception as e:
+                    print(f"Skipping sample due to error: {e}")
+                    continue
+
+            if not self.repeat:
+                break
