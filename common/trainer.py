@@ -242,7 +242,7 @@ class Trainer:
         self.prepare_logger()
         loss_rec = LossRecorder()
         progress  = ProgressBar(
-            total=1000000 // config.trainer.accumulate_grad_batches,
+            total=config.trainer.max_steps // config.trainer.accumulate_grad_batches,
             disable=not fabric.is_global_zero,
         )
         #assert len(self.dataloader) > 0, "Dataloader is empty"

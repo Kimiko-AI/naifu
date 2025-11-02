@@ -61,7 +61,7 @@ advanced:
 
 sampling:
   enabled: True
-  every_n_steps: 1000
+  every_n_steps: 500
   every_n_epochs: 1
   prompts:
     - "1girl"
