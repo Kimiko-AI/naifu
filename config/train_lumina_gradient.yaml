@@ -37,9 +37,9 @@ model:
 
 dataset:
   name: "data.gradient.TagImageIterableDataset"
-  image_size: 256
+ # image_size: 256
   dataset_path: "/root/ChatError/Dan_dataset"
-  batch_size: 32
+  batch_size: 16
 
 optimizer:
   name: "timm.optim.Muon"

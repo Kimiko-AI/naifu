@@ -247,7 +247,7 @@ class Trainer:
         )
         #assert len(self.dataloader) > 0, "Dataloader is empty"
         
-        steps_per_epoch = len(self.dataloader) // config.trainer.accumulate_grad_batches
+        steps_per_epoch = config.trainer.max_steps // config.trainer.accumulate_grad_batches
         resume_epoch = self.global_step // steps_per_epoch
         resume_step = self.global_step % steps_per_epoch
         while not should_stop:
