@@ -5,7 +5,7 @@ lightning:
   precision: "bf16-mixed"
   accelerator: "auto"
   devices: "auto"
-  strategy: "deepspeed_stage_2"
+  strategy: "ddp_find_unused_parameters_true"
 
 trainer:
   model_path: ""

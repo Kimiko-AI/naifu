@@ -11,7 +11,7 @@ from common.utils import *
 from common.logging import logger
 from omegaconf import OmegaConf
 from pathlib import Path
-
+from lightning.fabric.strategies.fsdp import fsdp_overlap_step_with_backward
 def _cleanup_old_checkpoints(ckpt_dir: str, keep_last_n: int = 2):
     """
     Remove older checkpoints, keeping only the most recent N.
@@ -296,7 +296,8 @@ class Trainer:
                 with fabric.no_backward_sync(fabric_module, enabled=is_accumulating):
                 # with torch.autograd.detect_anomaly():
                     loss = self.model(batch)
-                    self.fabric.backward(loss / grad_accum_steps)
+                    with fsdp_overlap_step_with_backward(self.optimizers, self.model):
+                        self.fabric.backward(loss / grad_accum_steps)
 
                 loss = loss.detach().item()
                 loss_rec.add(epoch=self.current_epoch, step=batch_idx, loss=loss)
@@ -311,18 +312,18 @@ class Trainer:
                 if is_accumulating:
                     continue
 
-                #if grad_clip_val > 0:
-                #    grad_norm = self.fabric.clip_gradients(
-                #        module=fabric_module,
-                #        optimizer=self.optimizer,
-                #        max_norm=grad_clip_val
-                #    )
-                #    if grad_norm is not None:
-                #        metrics["train/grad_norm"] = grad_norm
+                if grad_clip_val > 0:
+                    grad_norm = self.fabric.clip_gradients(
+                        module=fabric_module,
+                        optimizer=self.optimizer,
+                        max_norm=grad_clip_val
+                    )
+                    if grad_norm is not None:
+                        metrics["train/grad_norm"] = grad_norm
 
-                if self.optimizer is not None:
-                    self.optimizer.step()
-                    self.optimizer.zero_grad(set_to_none=True)
+                #if self.optimizer is not None:
+                #    self.optimizer.step()
+                #    self.optimizer.zero_grad(set_to_none=True)
 
                 if self.scheduler is not None:
                     is_transformers_sch = "transformers" in config.scheduler.name
