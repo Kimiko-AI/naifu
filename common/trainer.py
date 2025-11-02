@@ -14,20 +14,23 @@ from pathlib import Path
 def _cleanup_old_checkpoints(ckpt_dir: str, keep_last_n: int = 2):
     """
     Remove older checkpoints, keeping only the most recent N.
+    Works for both directories and single .ckpt files.
     """
     checkpoints = sorted(
         glob.glob(os.path.join(ckpt_dir, "checkpoint-e*_s*")),
-        key=os.path.getmtime,  # sort by modification time
+        key=os.path.getmtime,
         reverse=True
     )
 
     for old_ckpt in checkpoints[keep_last_n:]:
         try:
-            shutil.rmtree(old_ckpt)
+            if os.path.isdir(old_ckpt):
+                shutil.rmtree(old_ckpt)
+            else:
+                os.remove(old_ckpt)
             logging.info(f"Removed old checkpoint: {old_ckpt}")
         except Exception as e:
             logging.warning(f"Could not remove {old_ckpt}: {e}")
-
 
 class Trainer:
     def __init__(self, fabric: pl.Fabric, config: OmegaConf):
