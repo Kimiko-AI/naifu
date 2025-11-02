@@ -3,11 +3,32 @@ import time
 
 import torch
 import lightning as pl
-
+import glob
+import shutil
+import re
+import logging
 from common.utils import *
 from common.logging import logger
 from omegaconf import OmegaConf
 from pathlib import Path
+
+def _cleanup_old_checkpoints(ckpt_dir: str, keep_last_n: int = 2):
+    """
+    Remove older checkpoints, keeping only the most recent N.
+    """
+    checkpoints = sorted(
+        glob.glob(os.path.join(ckpt_dir, "checkpoint-e*_s*")),
+        key=os.path.getmtime,  # sort by modification time
+        reverse=True
+    )
+
+    for old_ckpt in checkpoints[keep_last_n:]:
+        try:
+            shutil.rmtree(old_ckpt)
+            logging.info(f"Removed old checkpoint: {old_ckpt}")
+        except Exception as e:
+            logging.warning(f"Could not remove {old_ckpt}: {e}")
+
 
 class Trainer:
     def __init__(self, fabric: pl.Fabric, config: OmegaConf):
@@ -101,7 +122,7 @@ class Trainer:
 
     def save_model(self, is_last: bool = False):
         """
-        Save the model checkpoint.
+        Save the model checkpoint and keep only the most recent two.
         """
         config = self.model.config
         cfg = config.trainer
@@ -114,36 +135,36 @@ class Trainer:
         should_save = (is_last and is_ckpt_epoch) or is_ckpt_step
         if not should_save:
             return
-        
+
         if "schedulefree" in self.optimizer.__class__.__name__.lower():
             self.optimizer.eval()
 
         postfix = f"e{self.current_epoch}_s{self.global_step}"
         model_path = os.path.join(ckpt_dir, f"checkpoint-{postfix}")
         save_weights_only = cfg.get("save_weights_only", False)
-        
-        logger.info("Saving model checkpoint")
+
+        os.makedirs(ckpt_dir, exist_ok=True)
+        logger.info(f"Saving model checkpoint: {model_path}")
+
         metadata = {
             "global_step": str(self.global_step),
             "current_epoch": str(self.current_epoch),
         }
-        
-        # # save state if you want to use fabric.save
-        # state = dict(
-        #     mode=self.model,
-        #     global_step=self.global_step, 
-        #     current_epoch=self.current_epoch,
-        #     optimizer=self.optimizer,
-        # )
-        # self.fabric.save(model_path + "_state.pt", state)
-        
+
+        # Save model weights
         self.model.save_checkpoint(model_path, metadata)
+
+        # Save optimizer if needed
         if not save_weights_only:
             optimizer_state = {"optimizer": self.optimizer, **metadata}
             self.fabric.save(model_path + "_optimizer.pt", optimizer_state)
-            
+
         if "schedulefree" in self.optimizer.__class__.__name__.lower():
             self.optimizer.train()
+
+        # --- cleanup old checkpoints ---
+        keep_last_n = cfg.get("keep_last_n", 2)
+        _cleanup_old_checkpoints(ckpt_dir, keep_last_n)
 
     def perform_sampling(self, is_last: bool = False):
         """
