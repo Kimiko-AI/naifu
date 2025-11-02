@@ -18,7 +18,7 @@ trainer:
   seed: 42
   wandb_id: "Lumina_test"
   accumulate_grad_batches: 1
-  gradient_clip_val: 1.0
+  #gradient_clip_val: 1.0
   checkpoint_steps: 2000
   checkpoint_freq: 1
   save_weights_only: false
