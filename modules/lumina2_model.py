@@ -91,6 +91,8 @@ class Lumina2Model(pl.LightningModule):
 
         # Create model:
         self.model = Lumina_2b()
+        ckcp = torch.load("checkpoints/lumina_gradient/checkpoint-e0_s8000.ckpt", weights_only = False)
+        self.model.load_state_dict(ckcp)
         logger.info(f"DiT Parameters: {self.model.parameter_count():,}")
         self.model_patch_size = self.model.patch_size
 
