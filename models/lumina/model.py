@@ -377,7 +377,7 @@ class FeedForward(nn.Module):
         )
         nn.init.xavier_uniform_(self.w3.weight)
 
-    @torch.compile
+    #@torch.compile
     def _forward_silu_gating(self, x1, x3):
         return F.silu(x1) * x3
 

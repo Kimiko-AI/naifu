@@ -192,7 +192,7 @@ class Lumina2Model(pl.LightningModule):
             logger.info("apply gradient checkpointing")
             non_reentrant_wrapper = partial(
                 checkpoint_wrapper,
-                checkpoint_impl=CheckpointImpl.REENTRANT,
+                checkpoint_impl=CheckpointImpl.NO_REENTRANT,
             )
             apply_activation_checkpointing(
                 self.model,
