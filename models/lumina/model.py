@@ -1069,10 +1069,10 @@ class NextDiT(nn.Module):
 def NextDiT_2B_GQA_patch2_Adaln_Refiner(**kwargs):
     return NextDiT(
         patch_size=1,
-        dim=768,
+        dim=1536,
         n_layers=16,
-        n_heads=8,
-        n_kv_heads=4,
+        n_heads=16,
+        n_kv_heads=16,
         axes_dims=[32, 32, 32],
         axes_lens=[300, 512, 512],
         **kwargs
