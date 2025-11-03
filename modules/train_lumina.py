@@ -141,7 +141,7 @@ class SupervisedFineTune(Lumina2Model):
         loss_dict = trans.training_losses(self.model, latents, model_kwargs)
         # loss_dict_256 = trans.training_losses(self.model, latents_mb_256, model_kwargs)
 
-        loss_1024 = loss_dict["loss"].sum() / self.batch_size
+        loss_1024 = loss_dict["loss"].mean()
         # loss_256 = loss_dict_256["loss"].sum() / self.batch_size
         loss = loss_1024
 

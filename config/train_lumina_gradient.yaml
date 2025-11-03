@@ -45,7 +45,7 @@ optimizer:
   name: "timm.optim.Muon"
   params:
     lr: 0.005
-    weight_decay: 0.1
+    weight_decay: 0.01
 
 scheduler:
   name: "torch.optim.lr_scheduler.CosineAnnealingLR"

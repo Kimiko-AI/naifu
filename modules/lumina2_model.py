@@ -282,7 +282,6 @@ class Lumina2Model(pl.LightningModule):
             return_tensors="pt",
         )
 
-        # 将输入移动到正确的设备并设置数据类型
         text_input_ids = text_inputs.input_ids.to(self.target_device)
         prompt_masks = text_inputs.attention_mask.to(self.target_device)
         prompt_embeds = text_encoder(
