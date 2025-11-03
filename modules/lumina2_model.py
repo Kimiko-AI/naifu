@@ -309,7 +309,7 @@ class Lumina2Model(pl.LightningModule):
         vae_shift = 0
 
         # Stack images into a single batch tensor
-        x = torch.stack(images, dim=0).to(self.target_device, dtype=torch.bfloat16, non_blocking=True)
+        x = images.to(self.target_device, dtype=torch.bfloat16, non_blocking=True)
 
         # Encode all at once (much faster than looping)
         latents = self.vae.encode(x).latent_dist.mode()
