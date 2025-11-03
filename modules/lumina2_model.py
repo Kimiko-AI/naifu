@@ -217,13 +217,13 @@ class Lumina2Model(pl.LightningModule):
         if self.config.model.get("vae_path", None):
             self.vae = AutoencoderKL.from_pretrained(
                 self.config.model.vae_path,
-                torch_dtype=torch.bfloat16
+                torch_dtype=torch.float32
             )
         else:
             self.vae = AutoencoderKL.from_pretrained(
                 self.model_path,
                 subfolder="vae",
-                torch_dtype=torch.bfloat16
+                torch_dtype=torch.float32
             )
         self.vae.config.scaling_factor = 0.3125
         self.vae.config.shift_factor = 0
@@ -308,10 +308,11 @@ class Lumina2Model(pl.LightningModule):
         vae_shift = 0
 
         # Stack images into a single batch tensor
-        x = images.to(self.target_device, dtype=torch.bfloat16, non_blocking=True)
+        x = images.to(self.target_device, dtype=torch.float32, non_blocking=True)
 
         # Encode all at once (much faster than looping)
-        latents = self.vae.encode(x).latent_dist.mode()
+        with torch.autocast(self.target_device):
+            latents = self.vae.encode(x).latent_dist.mode()
 
         # Apply scale and shift to the whole batch
         latents = (latents - vae_shift) * vae_scale
