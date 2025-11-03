@@ -93,8 +93,8 @@ class Lumina2Model(pl.LightningModule):
         self.model = Lumina_2b()
 
         #Evil hard coded path
-        ckcp = torch.load("checkpoints/lumina_gradient/checkpoint-e0_s4000.ckpt", weights_only = False)
-        self.model.load_state_dict(ckcp["state_dict"])
+        #ckcp = torch.load("checkpoints/lumina_gradient/checkpoint-e0_s4000.ckpt", weights_only = False)
+        #self.model.load_state_dict(ckcp["state_dict"])
 
 
         logger.info(f"DiT Parameters: {self.model.parameter_count():,}")
@@ -540,7 +540,7 @@ class Lumina2Model(pl.LightningModule):
 
                 # 设置latent的尺寸
                 w, h = size
-                latent_w, latent_h = int(w // 16), int(h // 16)
+                latent_w, latent_h = int(w // 8), int(h // 8)
 
                 # 修复 generator 设备问题
                 if generator is not None:

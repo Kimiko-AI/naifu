@@ -721,7 +721,7 @@ class NextDiT(nn.Module):
     def __init__(
             self,
             patch_size: int = 2,
-            in_channels: int = 32,
+            in_channels: int = 4,
             dim: int = 4096,
             n_layers: int = 32,
             n_refiner_layers: int = 2,  # <--- Used by context_refiner
@@ -1068,11 +1068,11 @@ class NextDiT(nn.Module):
 
 def NextDiT_2B_GQA_patch2_Adaln_Refiner(**kwargs):
     return NextDiT(
-        patch_size=1,
-        dim=1152,
+        patch_size=2,
+        dim=768,
         n_layers=16,
-        n_heads=12,
-        n_kv_heads=12,
+        n_heads=8,
+        n_kv_heads=8,
         axes_dims=[32, 32, 32],
         axes_lens=[300, 512, 512],
         **kwargs

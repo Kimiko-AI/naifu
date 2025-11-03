@@ -14,7 +14,7 @@ trainer:
   checkpoint_dir: "checkpoints/lumina_gradient"
   save_every: 10000
   grad_clip: 20
-  max_steps: 800000
+  max_steps: 400000
   seed: 42
   wandb_id: "Lumina_test"
   accumulate_grad_batches: 1
@@ -28,7 +28,7 @@ trainer:
   resume: true
 
 model:
-  vae_path: "REPA-E/e2e-invae-hf"
+  vae_path: "REPA-E/e2e-sdvae-hf"
   tokenizer_path: "unsloth/gemma-3-1b-pt"
   text_encoder_path: "unsloth/gemma-3-1b-pt"
 
@@ -39,18 +39,18 @@ dataset:
   name: "data.gradient.TagImageIterableDataset"
  # image_size: 256
   dataset_path: "/root/ChatError/Dan_dataset"
-  batch_size: 32
+  batch_size: 64
 
 optimizer:
-  name: "timm.optim.Muon"
+  name: "torch.optim.AdamW"
   params:
     lr: 0.0005
-    weight_decay: 0.01
+    weight_decay: 0.1
 
 scheduler:
   name: "torch.optim.lr_scheduler.CosineAnnealingLR"
   params:
-    T_max: 800000
+    T_max: 400000
 
 advanced:
   train_text_encoder: False
