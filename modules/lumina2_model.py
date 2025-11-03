@@ -556,7 +556,7 @@ class Lumina2Model(pl.LightningModule):
                         generator = device_generator
 
                 # 生成 latents 并确保数据类型匹配
-                z = torch.randn([1, 32, latent_h, latent_w], generator=generator, device=device, dtype=dtype)
+                z = torch.randn([1, 4, latent_h, latent_w], generator=generator, device=device, dtype=dtype)
                 z = z.repeat(n * 2, 1, 1, 1)  # 复制一份用于负面提示词
 
                 # 设置模型参数
