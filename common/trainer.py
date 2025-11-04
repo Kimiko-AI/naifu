@@ -258,7 +258,7 @@ class Trainer:
             logger.info(f"Resuming training from step {self.global_step} and epoch {self.current_epoch}")
         else:
             logger.info(f"Starting training from epoch {self.current_epoch}")
-
+        self.global_step = 36000
         should_stop = False
         if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
             should_stop = True

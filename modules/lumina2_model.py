@@ -93,8 +93,8 @@ class Lumina2Model(pl.LightningModule):
         self.model = Lumina_2b()
 
         #Evil hard coded path
-        #ckcp = torch.load("checkpoints/lumina_gradient/checkpoint-e0_s4000.ckpt", weights_only = False)
-        #self.model.load_state_dict(ckcp["state_dict"])
+        ckcp = torch.load("checkpoints/lumina_gradient/checkpoint-e0_s36000.ckpt", weights_only = False)
+        self.model.load_state_dict(ckcp["state_dict"])
 
 
         logger.info(f"DiT Parameters: {self.model.parameter_count():,}")
@@ -423,7 +423,7 @@ class Lumina2Model(pl.LightningModule):
         generator = torch.Generator(device="cpu").manual_seed(config.seed)
         prompts = list(config.prompts)
         images = []
-        size = (config.get("height", 1024), config.get("width", 1024))
+        size = (config.get("height", 256), config.get("width", 256))
         self.model.eval()
 
         rank = 0
@@ -466,7 +466,7 @@ class Lumina2Model(pl.LightningModule):
         generator = torch.Generator(device="cpu").manual_seed(config.seed)
         prompts = list(config.prompts)
         images = []
-        size = (config.get("height", 1024), config.get("width", 1024))
+        size = (config.get("height", 256), config.get("width", 256))
         self.model.eval()
 
         for idx, prompt in tqdm(
