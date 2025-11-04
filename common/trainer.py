@@ -258,7 +258,6 @@ class Trainer:
             logger.info(f"Resuming training from step {self.global_step} and epoch {self.current_epoch}")
         else:
             logger.info(f"Starting training from epoch {self.current_epoch}")
-        self.global_step = 36000
         should_stop = False
         if cfg.max_epochs > 0 and self.current_epoch >= cfg.max_epochs:
             should_stop = True
@@ -285,8 +284,8 @@ class Trainer:
             for batch_idx, batch in enumerate(self.dataloader):  
                 # Skip the completed steps in the current epoch
                 local_acc_step = batch_idx // grad_accum_steps + 1
-                #if self.current_epoch == resume_epoch and local_acc_step < resume_step:
-                #    continue
+                if self.current_epoch == resume_epoch and local_acc_step < resume_step:
+                    continue
                 
                 local_step += 1    
                 local_timer = time.perf_counter()
