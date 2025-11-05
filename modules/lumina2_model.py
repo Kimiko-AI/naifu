@@ -621,7 +621,7 @@ class Lumina2Model(pl.LightningModule):
                 samples = samples.to(dtype=vae_dtype)  # 将samples转换为VAE的数据类型
 
                 # VAE解码
-                samples = self.vae.decode(samples / self.vae.config.scaling_factor + self.vae.config.shift_factor)[0]
+                samples = self.vae.decode(samples / 0.3125)[0]
                 samples = (samples + 1.0) / 2.0
                 samples = samples[:1]
 
