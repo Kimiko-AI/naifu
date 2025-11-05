@@ -49,7 +49,15 @@ BUCKET_SIZES = [
     (320, 192),
     (192, 320),
 ]
-
+BUCKET_SIZES = [
+    (512, 512),
+    (448, 576),
+    (576, 448),
+    (640, 384),
+    (384, 640),
+    (320, 704),
+    (704, 320)
+]
 
 class TagImageIterableDataset(IterableDataset):
     def __init__(self, dataset_path, split="train", batch_size=16, name="", shuffle=True, repeat=True):

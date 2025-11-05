@@ -14,7 +14,7 @@ trainer:
   checkpoint_dir: "checkpoints/lumina_gradient"
   save_every: 10000
   grad_clip: 20
-  max_steps: 400000
+  max_steps: 100000
   seed: 42
   wandb_id: "Lumina_test"
   accumulate_grad_batches: 1
@@ -39,7 +39,7 @@ dataset:
   name: "data.gradient.TagImageIterableDataset"
  # image_size: 256
   dataset_path: "/root/ChatError/Dan_dataset"
-  batch_size: 64
+  batch_size: 32
 
 optimizer:
   name: "timm.optim.Muon"
@@ -50,7 +50,7 @@ optimizer:
 scheduler:
   name: "torch.optim.lr_scheduler.CosineAnnealingLR"
   params:
-    T_max: 400000
+    T_max: 100000
 
 advanced:
   train_text_encoder: False
@@ -64,12 +64,12 @@ sampling:
   every_n_steps: 1000
   every_n_epochs: 1
   prompts:
-    - "1girl solo masterpiece best_quality school_uniform seifuku brown_hair medium_hair smiling outdoors park blue_sky day"
-    - "1girl solo fantasy silver_hair long_hair red_eyes pointy_ears elf armor holding_sword standing castle cinematic_lighting"
-    - "1girl solo casual blonde_hair ponytail glasses sweater skirt sitting cafe drinking_coffee indoors window rain"
-    - "1girl solo sci-fi pink_hair twintails cyberpunk neon_city jacket headphones looking_at_viewer night street"
-    - "1girl solo portrait close-up black_hair short_hair freckles serene_expression simple_background light_particles watercolor_(style)"
-    - "1girl solo witch witch_hat purple_hair long_dress holding_staff magical enchanting_forest full_moon night"
+    - "general 1girl solo masterpiece best_quality school_uniform seifuku brown_hair medium_hair smiling outdoors park blue_sky day"
+    - "general 1girl solo fantasy silver_hair long_hair red_eyes pointy_ears elf armor holding_sword standing castle cinematic_lighting"
+    - "general 1girl solo casual blonde_hair ponytail glasses sweater skirt sitting cafe drinking_coffee indoors window rain"
+    - "general 1girl solo sci-fi pink_hair twintails cyberpunk neon_city jacket headphones looking_at_viewer night street"
+    - "general 1girl solo portrait close-up black_hair short_hair freckles serene_expression simple_background light_particles watercolor_(style)"
+    - "general 1girl solo witch witch_hat purple_hair long_dress holding_staff magical enchanting_forest full_moon night"
 
   use_wandb: true
   save_dir: "samples/lumina_gradient"
