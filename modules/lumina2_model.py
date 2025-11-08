@@ -225,8 +225,8 @@ class Lumina2Model(pl.LightningModule):
                 subfolder="vae",
                 torch_dtype=torch.float32
             )
-        self.vae.config.scaling_factor = 0.3125
-        self.vae.config.shift_factor = 0
+        self.vae.config.scaling_factor = 0.12746273743957862
+        self.vae.config.shift_factor = 0.8640247167934477
         if advanced.get("latents_mean", None):
             self.latents_mean = torch.tensor(advanced.latents_mean)
             self.latents_std = torch.tensor(advanced.latents_std)
@@ -305,8 +305,8 @@ class Lumina2Model(pl.LightningModule):
 
     def encode_images(self, images):
         # VAE encode multiple images efficiently, return list of latents
-        vae_scale = 0.3125
-        vae_shift = 0
+        vae_scale = 0.12746273743957862
+        vae_shift = 0.8640247167934477
 
         # Stack images into a single batch tensor
         x = images.to(self.target_device, dtype=torch.bfloat16, non_blocking=True)
@@ -621,7 +621,7 @@ class Lumina2Model(pl.LightningModule):
                 samples = samples.to(dtype=vae_dtype)  # 将samples转换为VAE的数据类型
 
                 # VAE解码
-                samples = self.vae.decode(samples / 0.3125)[0]
+                samples = self.vae.decode(samples / 0.12746273743957862 + 0.8640247167934477)[0]
                 samples = (samples + 1.0) / 2.0
                 samples = samples[:1]
 
