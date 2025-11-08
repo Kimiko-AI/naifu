@@ -423,7 +423,7 @@ class Lumina2Model(pl.LightningModule):
         generator = torch.Generator(device="cpu").manual_seed(config.seed)
         prompts = list(config.prompts)
         images = []
-        size = (config.get("height", 512), config.get("width", 512))
+        size = (config.get("height", 256), config.get("width", 256))
         self.model.eval()
 
         rank = 0
@@ -466,7 +466,7 @@ class Lumina2Model(pl.LightningModule):
         generator = torch.Generator(device="cpu").manual_seed(config.seed)
         prompts = list(config.prompts)
         images = []
-        size = (config.get("height", 512), config.get("width", 512))
+        size = (config.get("height", 256), config.get("width", 256))
         self.model.eval()
 
         for idx, prompt in tqdm(
@@ -491,7 +491,7 @@ class Lumina2Model(pl.LightningModule):
             prompt,
             negative_prompt="",
             generator=None,
-            size=(512, 512),
+            size=(256, 256),
             steps=25,
             guidance_scale=4.0,
             solver="euler",

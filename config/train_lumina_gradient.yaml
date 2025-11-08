@@ -28,7 +28,7 @@ trainer:
   resume: true
 
 model:
-  vae_path: "REPA-E/e2e-sdvae-hf"
+  vae_path: "KBlueLeaf/EQ-SDXL-VAE"
   tokenizer_path: "unsloth/gemma-3-1b-pt"
   text_encoder_path: "unsloth/gemma-3-1b-pt"
 
@@ -39,7 +39,7 @@ dataset:
   name: "data.gradient.TagImageIterableDataset"
  # image_size: 256
   dataset_path: "/root/ChatError/Dan_dataset"
-  batch_size: 16
+  batch_size: 64
 
 optimizer:
   name: "timm.optim.Muon"

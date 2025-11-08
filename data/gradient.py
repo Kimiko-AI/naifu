@@ -42,13 +42,7 @@ class GradientDataset(Dataset):
     def init_dataloader(self, **kwargs):
         # kwargs can contain batch_size, shuffle, etc.
         return DataLoader(self, batch_size=self.batch_size, shuffle=True, pin_memory=True, )
-BUCKET_SIZES = [
-    (256, 256),
-    (224, 288),
-    (288, 224),
-    (320, 192),
-    (192, 320),
-]
+
 BUCKET_SIZES = [
     (512, 512),
     (448, 576),
@@ -58,7 +52,13 @@ BUCKET_SIZES = [
     (320, 704),
     (704, 320)
 ]
-
+BUCKET_SIZES = [
+    (256, 256),
+    (224, 288),
+    (288, 224),
+    (320, 192),
+    (192, 320),
+]
 class TagImageIterableDataset(IterableDataset):
     def __init__(self, dataset_path, split="train", batch_size=16, name="", shuffle=True, repeat=True):
         self.dataset = load_dataset(dataset_path, split=split)
