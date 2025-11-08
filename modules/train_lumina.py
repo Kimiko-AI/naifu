@@ -116,7 +116,7 @@ class SupervisedFineTune(Lumina2Model):
             None,
             snr_type=self.config.advanced.snr_type,
             do_shift=not self.config.advanced.no_shift,
-            seq_len=(256 // 16) ** 2,
+            seq_len=(256 // 8) ** 2,
             # seq_len=target_size//(16*16)
         )
 
