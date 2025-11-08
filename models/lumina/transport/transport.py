@@ -66,19 +66,19 @@ class Transport:
         """
         shape = th.tensor(z.size())
         N = th.prod(shape[1:])
-        _fn = lambda x: -N / 2.0 * np.log(2 * np.pi) - th.sum(x**2) / 2.0
+        _fn = lambda x: -N / 2.0 * np.log(2 * np.pi) - th.sum(x ** 2) / 2.0
         return th.vmap(_fn)(z)
 
     def check_interval(
-        self,
-        train_eps,
-        sample_eps,
-        *,
-        diffusion_form="SBDM",
-        sde=False,
-        reverse=False,
-        eval=False,
-        last_step_size=0.0,
+            self,
+            train_eps,
+            sample_eps,
+            *,
+            diffusion_form="SBDM",
+            sde=False,
+            reverse=False,
+            eval=False,
+            last_step_size=0.0,
     ):
         t0 = 0
         t1 = 1
@@ -87,7 +87,7 @@ class Transport:
             t1 = 1 - eps if (not sde or last_step_size == 0) else 1 - last_step_size
 
         elif (type(self.path_sampler) in [path.ICPlan, path.GVPCPlan]) and (
-            self.model_type != ModelType.VELOCITY or sde
+                self.model_type != ModelType.VELOCITY or sde
         ):  # avoid numerical issue by taking a first semi-implicit step
             t0 = eps if (diffusion_form == "SBDM" and sde) or self.model_type != ModelType.VELOCITY else 0
             t1 = 1 - eps if (not sde or last_step_size == 0) else 1 - last_step_size
@@ -137,7 +137,7 @@ class Transport:
         return t
 
     def get_lin_function(
-        self, x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15
+            self, x1: float = 256, y1: float = 0.5, x2: float = 4096, y2: float = 1.15
     ) -> Callable[[float], float]:
         m = (y2 - y1) / (x2 - x1)
         b = y1 - m * x1
@@ -154,9 +154,9 @@ class Transport:
             model_kwargs = {}
         t, x0, x1 = self.sample(x1)
         t, xt, ut = self.path_sampler.plan(t, x0, x1)
-        if "cond" in model_kwargs:
-            conds = model_kwargs.pop("cond")
-            xt = [th.cat([x, cond], dim=0) if cond is not None else x for x, cond in zip(xt, conds)]
+        # if "cond" in model_kwargs:
+        #     conds = model_kwargs.pop("cond")
+        #     xt = [th.cat([x, cond], dim=0) if cond is not None else x for x, cond in zip(xt, conds)]
         model_output = model(xt, t, **model_kwargs)
         B = len(x0)
 
@@ -167,7 +167,7 @@ class Transport:
                 assert len(model_output) == len(ut) == len(x1)
                 for i in range(B):
                     assert (
-                        model_output[i].shape == ut[i].shape == x1[i].shape
+                            model_output[i].shape == ut[i].shape == x1[i].shape
                     ), f"{model_output[i].shape} {ut[i].shape} {x1[i].shape}"
                 terms["task_loss"] = th.stack(
                     [((ut[i] - model_output[i]) ** 2).mean() for i in range(B)],
@@ -217,14 +217,14 @@ class Transport:
         return body_fn
 
     def get_score(
-        self,
+            self,
     ):
         """member function for obtaining score of
         x_t = alpha_t * x + sigma_t * eps"""
         if self.model_type == ModelType.NOISE:
             score_fn = (
                 lambda x, t, model, **kwargs: model(x, t, **kwargs)
-                / -self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, x))[0]
+                                              / -self.path_sampler.compute_sigma_t(path.expand_t_like_x(t, x))[0]
             )
         elif self.model_type == ModelType.SCORE:
             score_fn = lambda x, t, model, **kwagrs: model(x, t, **kwagrs)
@@ -242,8 +242,8 @@ class Sampler:
     """Sampler class for the transport model"""
 
     def __init__(
-        self,
-        transport,
+            self,
+            transport,
     ):
         """Constructor for a general sampler; supporting different sampling methods
         Args:
@@ -255,10 +255,10 @@ class Sampler:
         self.score = self.transport.get_score()
 
     def __get_sde_diffusion_and_drift(
-        self,
-        *,
-        diffusion_form="SBDM",
-        diffusion_norm=1.0,
+            self,
+            *,
+            diffusion_form="SBDM",
+            diffusion_norm=1.0,
     ):
         def diffusion_fn(x, t):
             diffusion = self.transport.path_sampler.compute_diffusion(x, t, form=diffusion_form, norm=diffusion_norm)
@@ -273,11 +273,11 @@ class Sampler:
         return sde_drift, sde_diffusion
 
     def __get_last_step(
-        self,
-        sde_drift,
-        *,
-        last_step,
-        last_step_size,
+            self,
+            sde_drift,
+            *,
+            last_step,
+            last_step_size,
     ):
         """Get the last step function of the SDE solver"""
 
@@ -303,14 +303,14 @@ class Sampler:
         return last_step_fn
 
     def sample_sde(
-        self,
-        *,
-        sampling_method="Euler",
-        diffusion_form="SBDM",
-        diffusion_norm=1.0,
-        last_step="Mean",
-        last_step_size=0.04,
-        num_steps=250,
+            self,
+            *,
+            sampling_method="Euler",
+            diffusion_form="SBDM",
+            diffusion_norm=1.0,
+            last_step="Mean",
+            last_step_size=0.04,
+            num_steps=250,
     ):
         """returns a sampling function with given SDE settings
         Args:
@@ -362,11 +362,11 @@ class Sampler:
             return xs
 
         return _sample
-    
+
     def sample_dpm(
-        self,
-        model,
-        model_kwargs=None,
+            self,
+            model,
+            model_kwargs=None,
     ):
 
         noise_schedule = NoiseScheduleFlow(schedule="discrete_flow")
@@ -382,17 +382,16 @@ class Sampler:
 
         return DPM_Solver(noise_pred_fn, noise_schedule, algorithm_type="dpmsolver++").sample
 
-
     def sample_ode(
-        self,
-        *,
-        sampling_method="dopri5",
-        num_steps=50,
-        atol=1e-6,
-        rtol=1e-3,
-        reverse=False,
-        do_shift=False,
-        time_shifting_factor=None, 
+            self,
+            *,
+            sampling_method="dopri5",
+            num_steps=50,
+            atol=1e-6,
+            rtol=1e-3,
+            reverse=False,
+            do_shift=False,
+            time_shifting_factor=None,
     ):
         """returns a sampling function with given ODE settings
         Args:
@@ -431,12 +430,12 @@ class Sampler:
         return _ode.sample
 
     def sample_ode_likelihood(
-        self,
-        *,
-        sampling_method="dopri5",
-        num_steps=50,
-        atol=1e-6,
-        rtol=1e-3,
+            self,
+            *,
+            sampling_method="dopri5",
+            num_steps=50,
+            atol=1e-6,
+            rtol=1e-3,
     ):
         """returns a sampling function for calculating likelihood with given ODE settings
         Args:

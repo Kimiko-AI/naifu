@@ -14,7 +14,7 @@ trainer:
   checkpoint_dir: "checkpoints/lumina_gradient"
   save_every: 10000
   grad_clip: 1
-  max_steps: 100000
+  max_steps: 200000
   seed: 42
   wandb_id: "Lumina_test"
   accumulate_grad_batches: 1
@@ -42,7 +42,7 @@ dataset:
   batch_size: 64
 
 optimizer:
-  name: "timm.optim.Muon"
+  name: "torch.optim.AdamW"
   params:
     lr: 0.001
     weight_decay: 0.01
@@ -50,7 +50,7 @@ optimizer:
 scheduler:
   name: "torch.optim.lr_scheduler.CosineAnnealingLR"
   params:
-    T_max: 100000
+    T_max: 200000
 
 advanced:
   train_text_encoder: False
