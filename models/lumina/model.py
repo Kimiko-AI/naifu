@@ -607,146 +607,9 @@ class Lumina(nn.Module):
         self.dim = dim
         self.n_heads = n_heads
 
-    def patchify_and_embed(
-        self,
-        x: List[torch.Tensor] | torch.Tensor,
-        cap_feats: torch.Tensor,
-        cap_mask: torch.Tensor,
-        t: torch.Tensor,
-    ) -> Tuple[
-        torch.Tensor, torch.Tensor, List[Tuple[int, int]], List[int], torch.Tensor
-    ]:
-        # TODO: clean this padding logic and separate it into dedicated function
-        bsz = len(x)
-        pH = pW = self.patch_size
-        device = x[0].device
-
-        l_effective_cap_len = cap_mask.sum(dim=1).tolist()
-        img_sizes = [(img.size(1), img.size(2)) for img in x]
-        l_effective_img_len = [(H // pH) * (W // pW) for (H, W) in img_sizes]
-
-        max_seq_len = max(
-            (
-                cap_len + img_len
-                for cap_len, img_len in zip(l_effective_cap_len, l_effective_img_len)
-            )
-        )
-        max_cap_len = max(l_effective_cap_len)
-        max_img_len = max(l_effective_img_len)
-
-        position_ids = torch.zeros(
-            bsz, max_seq_len, 3, dtype=torch.int32, device=device
-        )
-
-        for i in range(bsz):
-            cap_len = l_effective_cap_len[i]
-            img_len = l_effective_img_len[i]
-            H, W = img_sizes[i]
-            H_tokens, W_tokens = H // pH, W // pW
-            assert H_tokens * W_tokens == img_len
-
-            position_ids[i, :cap_len, 0] = torch.arange(
-                cap_len, dtype=torch.int32, device=device
-            )
-            position_ids[i, cap_len : cap_len + img_len, 0] = cap_len
-            row_ids = (
-                torch.arange(H_tokens, dtype=torch.int32, device=device)
-                .view(-1, 1)
-                .repeat(1, W_tokens)
-                .flatten()
-            )
-            col_ids = (
-                torch.arange(W_tokens, dtype=torch.int32, device=device)
-                .view(1, -1)
-                .repeat(H_tokens, 1)
-                .flatten()
-            )
-            position_ids[i, cap_len : cap_len + img_len, 1] = row_ids
-            position_ids[i, cap_len : cap_len + img_len, 2] = col_ids
-
-        freqs_cis = self.rope_embedder(position_ids)
-
-        # build freqs_cis for cap and image individually
-        cap_freqs_cis_shape = list(freqs_cis.shape)
-        # cap_freqs_cis_shape[1] = max_cap_len
-        cap_freqs_cis_shape[1] = cap_feats.shape[1]
-        cap_freqs_cis = torch.zeros(
-            *cap_freqs_cis_shape, device=device, dtype=freqs_cis.dtype
-        )
-
-        img_freqs_cis_shape = list(freqs_cis.shape)
-        img_freqs_cis_shape[1] = max_img_len
-        img_freqs_cis = torch.zeros(
-            *img_freqs_cis_shape, device=device, dtype=freqs_cis.dtype
-        )
-
-        for i in range(bsz):
-            cap_len = l_effective_cap_len[i]
-            img_len = l_effective_img_len[i]
-            cap_freqs_cis[i, :cap_len] = freqs_cis[i, :cap_len]
-            img_freqs_cis[i, :img_len] = freqs_cis[i, cap_len : cap_len + img_len]
-
-        # refine context
-        for layer in self.context_refiner:
-            if self.training:
-                cap_feats = ckpt.checkpoint(layer, cap_feats, cap_mask, cap_freqs_cis)
-            else:
-                cap_feats = layer(cap_feats, cap_mask, cap_freqs_cis)
-
-        # refine image
-        flat_x = []
-        for i in range(bsz):
-            img = x[i]
-            C, H, W = img.size()
-            img = (
-                img.view(C, H // pH, pH, W // pW, pW)
-                .permute(1, 3, 2, 4, 0)
-                .flatten(2)
-                .flatten(0, 1)
-            )
-            flat_x.append(img)
-        x = flat_x
-        padded_img_embed = torch.zeros(
-            bsz, max_img_len, x[0].shape[-1], device=device, dtype=x[0].dtype
-        )
-        padded_img_mask = torch.zeros(bsz, max_img_len, dtype=torch.bool, device=device)
-        for i in range(bsz):
-            padded_img_embed[i, : l_effective_img_len[i]] = x[i]
-            padded_img_mask[i, : l_effective_img_len[i]] = True
-
-        padded_img_embed = self.x_embedder(padded_img_embed)
-        for layer in self.noise_refiner:
-            if self.training:
-                padded_img_embed = ckpt.checkpoint(
-                    layer, padded_img_embed, padded_img_mask, img_freqs_cis, t
-                )
-            else:
-                padded_img_embed = layer(
-                    padded_img_embed, padded_img_mask, img_freqs_cis, t
-                )
-
-        mask = torch.zeros(bsz, max_seq_len, dtype=torch.bool, device=device)
-        padded_full_embed = torch.zeros(
-            bsz, max_seq_len, self.dim, device=device, dtype=x[0].dtype
-        )
-        for i in range(bsz):
-            cap_len = l_effective_cap_len[i]
-            img_len = l_effective_img_len[i]
-
-            mask[i, : cap_len + img_len] = True
-            padded_full_embed[i, :cap_len] = cap_feats[i, :cap_len]
-            padded_full_embed[i, cap_len : cap_len + img_len] = padded_img_embed[
-                i, :img_len
-            ]
-
-        return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
 
     def unpatchify(
-        self,
-        x: torch.Tensor,
-        img_size: List[Tuple[int, int]],
-        cap_size: List[int],
-        return_tensor=False,
+        self, x: torch.Tensor, img_size: List[Tuple[int, int]], cap_size: List[int], return_tensor=False
     ) -> List[torch.Tensor]:
         """
         x: (N, T, patch_size**2 * C)
@@ -770,17 +633,98 @@ class Lumina(nn.Module):
             imgs = torch.stack(imgs, dim=0)
         return imgs
 
-    @property
-    def device(self):
-        # Get the device of the module (assumes all parameters are on the same device)
-        return next(self.parameters()).device
+    def patchify_and_embed(
+        self, x: List[torch.Tensor] | torch.Tensor, cap_feats: torch.Tensor, cap_mask: torch.Tensor, t: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[Tuple[int, int]], List[int], torch.Tensor]:
+        bsz = len(x)
+        pH = pW = self.patch_size
+        device = x[0].device
 
-    def set_use_compiled(self):
-        for name, module in self.named_modules():
-            # Check if the module has the 'use_compiled' attribute
-            if hasattr(module, "use_compiled"):
-                print(f"Setting 'use_compiled' to True in module: {name}")
-                setattr(module, "use_compiled", True)
+        l_effective_cap_len = cap_mask.sum(dim=1).tolist()
+        img_sizes = [(img.size(1), img.size(2)) for img in x]
+        l_effective_img_len = [(H // pH) * (W // pW) for (H, W) in img_sizes]
+
+
+        max_seq_len = max(
+            (cap_len+img_len for cap_len, img_len in zip(l_effective_cap_len, l_effective_img_len))
+        )
+        max_cap_len = max(l_effective_cap_len)
+        max_img_len = max(l_effective_img_len)
+        # logger.info(f"l_effective_cap_len: {l_effective_cap_len}")
+        # logger.info(f"l_effective_img_len: {l_effective_img_len}")
+        # logger.info(f"img_sizes: {img_sizes}")
+        # logger.info(f"max_seq_len: {max_seq_len}")
+        # logger.info(f"max_cap_len: {max_cap_len}")
+        # logger.info(f"max_img_len: {max_img_len}")
+        # logger.info(f"bsz: {bsz}")
+        position_ids = torch.zeros(bsz, max_seq_len, 3, dtype=torch.int32, device=device)
+
+        for i in range(bsz):
+            cap_len = l_effective_cap_len[i]
+            img_len = l_effective_img_len[i]
+            H, W = img_sizes[i]
+            H_tokens, W_tokens = H // pH, W // pW
+            assert H_tokens * W_tokens == img_len
+
+            position_ids[i, :cap_len, 0] = torch.arange(cap_len, dtype=torch.int32, device=device)
+            position_ids[i, cap_len:cap_len+img_len, 0] = cap_len
+            row_ids = torch.arange(H_tokens, dtype=torch.int32, device=device).view(-1, 1).repeat(1, W_tokens).flatten()
+            col_ids = torch.arange(W_tokens, dtype=torch.int32, device=device).view(1, -1).repeat(H_tokens, 1).flatten()
+            position_ids[i, cap_len:cap_len+img_len, 1] = row_ids
+            position_ids[i, cap_len:cap_len+img_len, 2] = col_ids
+
+        freqs_cis = self.rope_embedder(position_ids)
+
+        # build freqs_cis for cap and image individually
+        cap_freqs_cis_shape = list(freqs_cis.shape)
+        # cap_freqs_cis_shape[1] = max_cap_len
+        cap_freqs_cis_shape[1] = cap_feats.shape[1]
+        cap_freqs_cis = torch.zeros(*cap_freqs_cis_shape, device=device, dtype=freqs_cis.dtype)
+
+        img_freqs_cis_shape = list(freqs_cis.shape)
+        img_freqs_cis_shape[1] = max_img_len
+        img_freqs_cis = torch.zeros(*img_freqs_cis_shape, device=device, dtype=freqs_cis.dtype)
+
+        for i in range(bsz):
+            cap_len = l_effective_cap_len[i]
+            img_len = l_effective_img_len[i]
+            cap_freqs_cis[i, :cap_len] = freqs_cis[i, :cap_len]
+            img_freqs_cis[i, :img_len] = freqs_cis[i, cap_len:cap_len+img_len]
+
+        # refine context
+        for layer in self.context_refiner:
+            cap_feats = layer(cap_feats, cap_mask, cap_freqs_cis)
+
+        # refine image
+        flat_x = []
+        for i in range(bsz):
+            img = x[i]
+            C, H, W = img.size()
+            img = img.view(C, H // pH, pH, W // pW, pW).permute(1, 3, 2, 4, 0).flatten(2).flatten(0, 1)
+            flat_x.append(img)
+        x = flat_x
+        padded_img_embed = torch.zeros(bsz, max_img_len, x[0].shape[-1], device=device, dtype=x[0].dtype)
+        padded_img_mask = torch.zeros(bsz, max_img_len, dtype=torch.bool, device=device)
+        for i in range(bsz):
+            padded_img_embed[i, :l_effective_img_len[i]] = x[i]
+            padded_img_mask[i, :l_effective_img_len[i]] = True
+
+        padded_img_embed = self.x_embedder(padded_img_embed)
+        for layer in self.noise_refiner:
+            padded_img_embed = layer(padded_img_embed, padded_img_mask, img_freqs_cis, t)
+
+        mask = torch.zeros(bsz, max_seq_len, dtype=torch.bool, device=device)
+        padded_full_embed = torch.zeros(bsz, max_seq_len, self.dim, device=device, dtype=x[0].dtype)
+        for i in range(bsz):
+            cap_len = l_effective_cap_len[i]
+            img_len = l_effective_img_len[i]
+
+            mask[i, :cap_len+img_len] = True
+            padded_full_embed[i, :cap_len] = cap_feats[i, :cap_len]
+            padded_full_embed[i, cap_len:cap_len+img_len] = padded_img_embed[i, :img_len]
+
+        return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
+
 
     def forward(self, x, t, cap_feats, cap_mask):
         """
@@ -789,29 +733,125 @@ class Lumina(nn.Module):
         y: (N,) tensor of text tokens/features
         """
 
+        # import torch.distributed as dist
+        # if not dist.is_initialized() or dist.get_rank() == 0:
+        #     import pdb
+        #     pdb.set_trace()
+            # torch.save([x, t, cap_feats, cap_mask], "./fake_input.pt")
         t = self.t_embedder(t)  # (N, D)
         adaln_input = t
 
-        cap_feats = self.cap_embedder(
-            cap_feats
-        )  # (N, L, D)  # todo check if able to batchify w.o. redundant compute
+        cap_feats = self.cap_embedder(cap_feats)  # (N, L, D)  # todo check if able to batchify w.o. redundant compute
 
         x_is_tensor = isinstance(x, torch.Tensor)
-        x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(
-            x, cap_feats, cap_mask, t
-        )
+        x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(x, cap_feats, cap_mask, t)
         freqs_cis = freqs_cis.to(x.device)
 
         for layer in self.layers:
-            if self.training:
-                x = ckpt.checkpoint(layer, x, mask, freqs_cis, adaln_input)
-            else:
-                x = layer(x, mask, freqs_cis, adaln_input)
+            x = layer(x, mask, freqs_cis, adaln_input)
 
         x = self.final_layer(x, adaln_input)
         x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)
 
         return x
+
+    def forward_with_cfg(
+        self,
+        x,
+        t,
+        cap_feats,
+        cap_mask,
+        cfg_scale,
+        cfg_trunc=100,
+        renorm_cfg=1
+    ):
+        """
+        Forward pass of NextDiT, but also batches the unconditional forward pass
+        for classifier-free guidance.
+        """
+        # # https://github.com/openai/glide-text2im/blob/main/notebooks/text2im.ipynb
+        half = x[: len(x) // 2]
+        if t[0] < cfg_trunc:
+            combined = torch.cat([half, half], dim=0) # [2, 16, 128, 128]
+            model_out = self.forward(combined, t, cap_feats, cap_mask) # [2, 16, 128, 128]
+            # For exact reproducibility reasons, we apply classifier-free guidance on only
+            # three channels by default. The standard approach to cfg applies it to all channels.
+            # This can be done by uncommenting the following line and commenting-out the line following that.
+            eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
+            cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
+            half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
+            if float(renorm_cfg) > 0.0:
+                ori_pos_norm = torch.linalg.vector_norm(cond_eps
+                        , dim=tuple(range(1, len(cond_eps.shape))), keepdim=True
+                )
+                max_new_norm = ori_pos_norm * float(renorm_cfg)
+                new_pos_norm = torch.linalg.vector_norm(
+                        half_eps, dim=tuple(range(1, len(half_eps.shape))), keepdim=True
+                    )
+                if new_pos_norm >= max_new_norm:
+                    half_eps = half_eps * (max_new_norm / new_pos_norm)
+        else:
+            combined = half
+            model_out = self.forward(combined, t[:len(x) // 2], cap_feats[:len(x) // 2], cap_mask[:len(x) // 2])
+            eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
+            half_eps = eps
+
+        output = torch.cat([half_eps, half_eps], dim=0)
+        return output
+
+    @staticmethod
+    def precompute_freqs_cis(
+        dim: List[int],
+        end: List[int],
+        theta: float = 10000.0,
+    ):
+        """
+        Precompute the frequency tensor for complex exponentials (cis) with
+        given dimensions.
+
+        This function calculates a frequency tensor with complex exponentials
+        using the given dimension 'dim' and the end index 'end'. The 'theta'
+        parameter scales the frequencies. The returned tensor contains complex
+        values in complex64 data type.
+
+        Args:
+            dim (list): Dimension of the frequency tensor.
+            end (list): End index for precomputing frequencies.
+            theta (float, optional): Scaling factor for frequency computation.
+                Defaults to 10000.0.
+
+        Returns:
+            torch.Tensor: Precomputed frequency tensor with complex
+                exponentials.
+        """
+        freqs_cis = []
+        for i, (d, e) in enumerate(zip(dim, end)):
+            freqs = 1.0 / (theta ** (torch.arange(0, d, 2, dtype=torch.float64, device="cpu") / d))
+            timestep = torch.arange(e, device=freqs.device, dtype=torch.float64)
+            freqs = torch.outer(timestep, freqs).float()
+            freqs_cis_i = torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64)  # complex64
+            freqs_cis.append(freqs_cis_i)
+
+        return freqs_cis
+
+    def parameter_count(self) -> int:
+        total_params = 0
+
+        def _recursive_count_params(module):
+            nonlocal total_params
+            for param in module.parameters(recurse=False):
+                total_params += param.numel()
+            for submodule in module.children():
+                _recursive_count_params(submodule)
+
+        _recursive_count_params(self)
+        return total_params
+
+    def get_fsdp_wrap_module_list(self) -> List[nn.Module]:
+        return list(self.layers)
+
+    def get_checkpointing_wrap_module_list(self) -> List[nn.Module]:
+        return list(self.layers)
 
 
 
