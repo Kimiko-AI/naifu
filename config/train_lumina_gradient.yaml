@@ -14,7 +14,7 @@ trainer:
   checkpoint_dir: "checkpoints/lumina_gradient"
   save_every: 10000
   grad_clip: 20
-  max_steps: 400000
+  max_steps: 100000
   seed: 42
   wandb_id: "Lumina_test"
   accumulate_grad_batches: 1
@@ -50,7 +50,7 @@ optimizer:
 scheduler:
   name: "torch.optim.lr_scheduler.CosineAnnealingLR"
   params:
-    T_max: 400000
+    T_max: 100000
 
 advanced:
   train_text_encoder: False
