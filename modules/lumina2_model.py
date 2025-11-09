@@ -93,8 +93,8 @@ class Lumina2Model(pl.LightningModule):
         self.model = Lumina_2b()
 
         #Evil hard coded path
-        #ckcp = torch.load("checkpoints/lumina_gradient/checkpoint-e0_s96000.ckpt", weights_only = False)
-        #self.model.load_state_dict(ckcp["state_dict"])
+        ckcp = torch.load("checkpoints/lumina_gradient/checkpoint-e0_s28000.ckpt", weights_only = False)
+        self.model.load_state_dict(ckcp["state_dict"])
 
 
         logger.info(f"DiT Parameters: {self.model.parameter_count():,}")
