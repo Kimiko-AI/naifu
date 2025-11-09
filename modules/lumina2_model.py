@@ -492,7 +492,7 @@ class Lumina2Model(pl.LightningModule):
             negative_prompt="",
             generator=None,
             size=(256, 256),
-            steps=25,
+            steps=50,
             guidance_scale=4.0,
             solver="euler",
             path_type="Linear",

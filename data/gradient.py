@@ -167,3 +167,61 @@ class TagImageIterableDataset(IterableDataset):
             num_workers=8,
             **kwargs,
         )
+
+
+if __name__ == "__main__":
+
+    # --- Configuration ---
+    # !!! IMPORTANT: Replace this with your dataset path or HF repo ID !!!
+    # I'm using a public dataset that matches your 'webp' and 'json' fields.
+    DATASET_PATH = "/root/ChatError/Dan_dataset"
+
+    # We want 32 samples. Setting batch_size=32 will make the
+    # first batch we get have (up to) 32 samples from one bucket.
+    TEST_BATCH_SIZE = 32
+
+    print(f"Initializing dataset from: {DATASET_PATH}")
+
+    # Instantiate the dataset
+    # shuffle=False and repeat=False are good for a simple test.
+    dataset = TagImageIterableDataset(
+        dataset_path=DATASET_PATH,
+        split="train",
+        batch_size=TEST_BATCH_SIZE,
+        shuffle=False,
+        repeat=False
+    )
+
+    print("Fetching the first batch of samples...")
+
+    # We use a DataLoader with num_workers=0 for this simple test
+    # to avoid multiprocessing issues in a main script.
+    # Your init_dataloader() method is for actual training.
+    dataloader = DataLoader(dataset, batch_size=None, num_workers=0)
+
+    try:
+        # Get the first batch yielded by the iterator
+        first_batch = next(iter(dataloader))
+
+        prompts = first_batch["prompts"]
+
+        print(f"\n--- Displaying {len(prompts)} prompts from the first batch ---")
+
+        for i, prompt in enumerate(prompts):
+            print(f"Sample {i + 1}:")
+            # Adding indentation for readability
+            print(f"    {prompt}\n")
+
+            # This check ensures we only print up to 32,
+            # even if the batch was somehow larger.
+            if i + 1 >= 32:
+                break
+
+        print(f"--- Printed {len(prompts)} prompts. ---")
+
+    except StopIteration:
+        print("Dataset was empty or too small to produce a single batch.")
+    except Exception as e:
+        print(f"An error occurred while loading the dataset: {e}")
+        print("Please check that your DATASET_PATH is correct.")
+        print("If using the default, you may need to install 'datasets' and 'Pillow'.")
