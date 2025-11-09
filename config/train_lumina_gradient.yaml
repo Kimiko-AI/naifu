@@ -64,12 +64,14 @@ sampling:
   every_n_steps: 4000
   every_n_epochs: 1
   prompts:
-    - "general 1girl solo masterpiece best_quality school_uniform seifuku brown_hair medium_hair smiling outdoors park blue_sky day"
-    - "general 1girl solo fantasy silver_hair long_hair red_eyes pointy_ears elf armor holding_sword standing castle cinematic_lighting"
-    - "general 1girl solo casual blonde_hair ponytail glasses sweater skirt sitting cafe drinking_coffee indoors window rain"
-    - "general 1girl solo sci-fi pink_hair twintails cyberpunk neon_city jacket headphones looking_at_viewer night street"
-    - "general 1girl solo portrait close-up black_hair short_hair freckles serene_expression simple_background light_particles watercolor_(style)"
-    - "general 1girl solo witch witch_hat purple_hair long_dress holding_staff magical enchanting_forest full_moon night"
+    - "general 1girl blue_eyes blue_hair bubble candy character_name double_bun food food_in_mouth hair_bun lollipop low_twintails multicolored_hair portrait solo streaked_hair twintails twitter_username upper_body"
+    - "general 1girl blue_eyes blue_shirt bottle choker collarbone colored_eyelashes colored_skin cowboy_shot dress flower flower_in_mouth grey_skin hair_over_one_eye looking_at_viewer lying marking_on_cheek on_back parted_lips pill pinafore_dress purple_flower sample_watermark shirt short_hair short_sleeves sleeveless sleeveless_dress solo teardrop_facial_mark underwater watermark weibo_watermark white_choker white_dress white_flower white_hair"
+    - "general bulma ! !! 1girl aqua_eyes aqua_hair bow breasts cleavage dress emphasis_lines forehead hair_bow holding open_mouth pink_dress ponytail scouter small_breasts smile solo spaghetti_strap star_(symbol) striped_clothes striped_dress upper_body yellow_bow"
+    - "general 1girl animal_ears black_gloves blue_kimono blurry blurry_background bokeh brown_hair cat_ears chinese_zodiac day depth_of_field flower furisode gloves hair_flower hair_ornament happy_new_year holding holding_umbrella japanese_clothes kimono long_sleeves new_year oil-paper_umbrella outdoors print_kimono rose solo tail tiger_ears tiger_girl tiger_tail umbrella upper_body white_flower white_rose wide_sleeves year_of_the_tiger yellow_eyes"
+    - "general alice_margatroid 1girl blonde_hair blue_dress blue_eyes book capelet dress hairband long_sleeves looking_at_viewer obi reaching reaching_towards_viewer sash scarf simple_background smile solo upper_body white_background white_capelet"
+    - "general aoba_(kancolle) furutaka_(kancolle) teruzuki_(kancolle) 3girls aged_down black_eyes braid brown_hair camera headband heart multiple_girls outdoors ponytail porch purple_eyes purple_hair school_uniform serafuku short_hair shorts sitting sitting_on_lap sitting_on_person twin_braids yellow_eyes"
+    - "general 2girls ^^^ arm_behind_head arm_under_breasts blush breasts cat_hair_ornament closed_eyes collarbone comic dress greyscale hair_ornament hand_up large_breasts long_hair long_sleeves monochrome multiple_girls open_mouth parted_lips sailor_dress sparkle v-shaped_eyebrows very_long_hair yuri"
+    - "general 2girls ahoge backpack bag braid denim dress greyscale grin hand_on_own_hip handbag jeans locked_arms low_twin_braids medium_dress monochrome multiple_girls pants ponytail sandals shirt shoes smile sneakers t-shirt twin_braids watch wristwatch"
 
   use_wandb: true
   save_dir: "samples/lumina_gradient"

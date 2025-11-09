@@ -83,10 +83,10 @@ class TagImageIterableDataset(IterableDataset):
 
     def preprocess_sample(self, sample):
         json_data = sample["json"]
-        rating = json_data.get("rating", "")
+        rating = json_data.get("rating", [])
         character_tags = json_data.get("character_tags", [])
         general_tags = json_data.get("general_tags", [])
-        all_tags = [rating] + character_tags + general_tags
+        all_tags = rating + character_tags + general_tags
         tag_str = " ".join(map(str, all_tags))[:512]
 
         image = sample["webp"]
