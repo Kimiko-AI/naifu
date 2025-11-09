@@ -42,7 +42,7 @@ dataset:
   batch_size: 64
 
 optimizer:
-  name: "torch.optim.AdamW"
+  name: "timm.optim.Muon"
   params:
     lr: 0.001
     weight_decay: 0.01

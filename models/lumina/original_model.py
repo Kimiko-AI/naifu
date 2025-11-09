@@ -863,7 +863,7 @@ def NextDiT_2B_GQA_patch2_Adaln_Refiner(**kwargs):
     return Lumina(
         patch_size=2,
         in_channels=4,
-        dim=768,
+        dim= 768,
         n_layers=16,
         n_heads=8,
         n_kv_heads=8,
