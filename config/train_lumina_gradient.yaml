@@ -44,7 +44,7 @@ dataset:
 optimizer:
   name: "timm.optim.Muon"
   params:
-    lr: 0.03
+    lr: 0.001
     weight_decay: 0.01
 
 scheduler:
