@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
 from torch.nn import RMSNorm
+
 def modulate(x, scale):
     return x * (1 + scale.unsqueeze(1))
 
@@ -175,7 +176,7 @@ class JointAttention(nn.Module):
             dim,
             bias=False,
         )
-        nn.init.zeros_(self.out.weight)
+        nn.init.xavier_uniform_(self.out.weight)
 
         if qk_norm:
             self.q_norm = RMSNorm(self.head_dim)
@@ -238,20 +239,61 @@ class JointAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, multiple_of, ffn_dim_multiplier=None):
+    def __init__(
+        self,
+        dim: int,
+        hidden_dim: int,
+        multiple_of: int,
+        ffn_dim_multiplier: Optional[float],
+    ):
+        """
+        Initialize the FeedForward module.
+
+        Args:
+            dim (int): Input dimension.
+            hidden_dim (int): Hidden dimension of the feedforward layer.
+            multiple_of (int): Value to ensure hidden dimension is a multiple
+                of this value.
+            ffn_dim_multiplier (float, optional): Custom multiplier for hidden
+                dimension. Defaults to None.
+
+        """
         super().__init__()
+        # custom dim factor multiplier
         if ffn_dim_multiplier is not None:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w1 = nn.Linear(
+            dim,
+            hidden_dim,
+            bias=False,
+        )
         nn.init.xavier_uniform_(self.w1.weight)
-        nn.init.zeros_(self.w2.weight)
+        self.w2 = nn.Linear(
+            hidden_dim,
+            dim,
+            bias=False,
+        )
+        nn.init.xavier_uniform_(self.w2.weight)
+        self.w3 = nn.Linear(
+            dim,
+            hidden_dim,
+            bias=False,
+        )
+        nn.init.xavier_uniform_(self.w3.weight)
+        self.use_compiled = False
+
+    def _forward_silu_gating(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
     def forward(self, x):
-        return self.w2(F.relu(self.w1(x)).square())
-
+        # disabled for now
+        # https://github.com/pytorch/pytorch/issues/128035
+        # if self.use_compiled:
+        #     return torch.compile(self._forward_silu_gating)(x)
+        # else:
+        return self._forward_silu_gating(x)
 
 
 class JointTransformerBlock(nn.Module):
@@ -556,8 +598,6 @@ class Lumina(nn.Module):
         self.rope_embedder = RopeEmbedder(axes_dims=axes_dims, axes_lens=axes_lens)
         self.dim = dim
         self.n_heads = n_heads
-        self.alpha = nn.Parameter(torch.ones(dim))
-        self.beta = nn.Parameter(torch.zeros(dim))
 
 
     def unpatchify(
@@ -698,14 +738,9 @@ class Lumina(nn.Module):
         x_is_tensor = isinstance(x, torch.Tensor)
         x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(x, cap_feats, cap_mask, t)
         freqs_cis = freqs_cis.to(x.device)
-        orig_x = x
-        alpha = self.alpha.view(1, 1, -1)
-        beta = self.beta.view(1, 1, -1)
-        for i, layer in enumerate(self.layers):
+
+        for layer in self.layers:
             x = layer(x, mask, freqs_cis, adaln_input)
-            # perform weighted sum 3 layers from the end
-            if i == len(self.layers) - 3:
-                x = alpha * x + beta * orig_x
 
         x = self.final_layer(x, adaln_input)
         x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)
@@ -821,8 +856,8 @@ def NextDiT_2B_GQA_patch2_Adaln_Refiner(**kwargs):
         patch_size=2,
         in_channels=4,
         dim= 768,
-        n_layers= 16,
-        n_heads= 8,
+        n_layers=16,
+        n_heads=8,
         n_kv_heads=8,
         axes_dims=[32, 32, 32],
         axes_lens=[300, 512, 512],
