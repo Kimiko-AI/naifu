@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as ckpt
 
-@torch.compile
 def modulate(x, scale):
     return x * (1 + scale.unsqueeze(1))
 
@@ -108,8 +107,6 @@ class RMSNorm(torch.nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
-
-    @torch.compile
     def forward(self, x):
         return F.rms_norm(x, self.weight.shape, weight=self.weight, eps=self.eps)
 
