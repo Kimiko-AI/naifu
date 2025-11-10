@@ -181,7 +181,7 @@ if __name__ == "__main__":
         repeat=False
     )
 
-    dataloader = DataLoader(dataset, batch_size=None, num_workers=0, prefetch_factor = 16,)
+    dataloader = DataLoader(dataset, batch_size=None, num_workers=16, prefetch_factor = 16,)
 
     all_prompts = []
     all_pixel_hashes = []
