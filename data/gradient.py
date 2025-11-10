@@ -168,58 +168,64 @@ class TagImageIterableDataset(IterableDataset):
         )
 
 if __name__ == "__main__":
+    import torch
+    from torch.utils.data import get_worker_info
 
     # --- Configuration ---
-    # !!! IMPORTANT: Replace this with your dataset path or HF repo ID !!!
-    # I'm using a public dataset that matches your 'webp' and 'json' fields.
     DATASET_PATH = "/root/ChatError/Dan_dataset/train/{00001..00069}.tar"
+    TOTAL_SAMPLES_TO_CHECK = 128
+    BATCH_SIZE = 16
+    NUM_WORKERS = 8
 
-    # We want 32 samples. Setting batch_size=32 will make the
-    # first batch we get have (up to) 32 samples from one bucket.
-    TEST_BATCH_SIZE = 32
+    print(f"\nInitializing TagImageIterableDataset from: {DATASET_PATH}")
+    print(f"Running check with {TOTAL_SAMPLES_TO_CHECK} samples, "
+          f"batch_size={BATCH_SIZE}, num_workers={NUM_WORKERS}\n")
 
-    print(f"Initializing dataset from: {DATASET_PATH}")
-
-    # Instantiate the dataset
-    # shuffle=False and repeat=False are good for a simple test.
     dataset = TagImageIterableDataset(
         dataset_path=DATASET_PATH,
         split="train",
-        batch_size=TEST_BATCH_SIZE,
+        batch_size=BATCH_SIZE,
         shuffle=False,
-        repeat=False
+        repeat=False,
     )
 
-    print("Fetching the first batch of samples...")
+    dataloader = DataLoader(
+        dataset,
+        batch_size=None,   # dataset handles batching
+        num_workers=NUM_WORKERS,
+        pin_memory=True,
+    )
 
-    # We use a DataLoader with num_workers=0 for this simple test
-    # to avoid multiprocessing issues in a main script.
-    # Your init_dataloader() method is for actual training.
-    dataloader = DataLoader(dataset, batch_size=None, num_workers=0)
+    seen_prompts = set()
+    worker_seen = {}
 
-    try:
-        # Get the first batch yielded by the iterator
-        first_batch = next(iter(dataloader))
+    total_samples = 0
+    for batch_idx, batch in enumerate(dataloader):
+        prompts = batch["prompts"]
+        total_samples += len(prompts)
 
-        prompts = first_batch["prompts"]
+        # Detect which worker produced this batch
+        worker_info = get_worker_info()
+        wid = worker_info.id if worker_info else -1
 
-        print(f"\n--- Displaying {len(prompts)} prompts from the first batch ---")
+        for p in prompts:
+            worker_seen.setdefault(wid, []).append(p)
+            if p in seen_prompts:
+                print(f"⚠️ Duplicate prompt found in batch {batch_idx}: {p[:60]}...")
+            seen_prompts.add(p)
 
-        for i, prompt in enumerate(prompts):
-            print(f"Sample {i + 1}:")
-            # Adding indentation for readability
-            print(f"    {prompt}\n")
+        print(f"Batch {batch_idx:03d}: {len(prompts)} samples "
+              f"(total so far: {total_samples})")
 
-            # This check ensures we only print up to 32,
-            # even if the batch was somehow larger.
-            if i + 1 >= 32:
-                break
+        if total_samples >= TOTAL_SAMPLES_TO_CHECK:
+            break
 
-        print(f"--- Printed {len(prompts)} prompts. ---")
+    print("\n--- Summary ---")
+    print(f"Total unique prompts: {len(seen_prompts)}")
+    print(f"Total processed: {total_samples}")
+    print(f"Duplicates found: {total_samples - len(seen_prompts)}")
 
-    except StopIteration:
-        print("Dataset was empty or too small to produce a single batch.")
-    except Exception as e:
-        print(f"An error occurred while loading the dataset: {e}")
-        print("Please check that your DATASET_PATH is correct.")
-        print("If using the default, you may need to install 'datasets' and 'Pillow'.")
+    for wid, samples in worker_seen.items():
+        print(f"Worker {wid} handled {len(samples)} samples")
+
+    print("\n✅ Test complete.")
