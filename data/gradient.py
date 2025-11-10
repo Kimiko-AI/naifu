@@ -80,7 +80,7 @@ class TagImageIterableDataset(IterableDataset):
         self.name = name
 
         # Set up WebDataset pipeline
-        dataset = wds.WebDataset(dataset_path).decode("pil").to_tuple("webp", "json").split_by_worker
+        dataset = wds.WebDataset(dataset_path).decode("pil").to_tuple("webp", "json").split_by_worker.tarfile_to_samples()
 
         if shuffle:
             dataset = dataset.shuffle(1000)
