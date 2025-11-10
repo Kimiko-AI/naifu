@@ -179,7 +179,7 @@ if __name__ == "__main__":
 
     # --- Configuration ---
     DATASET_PATH = "/root/ChatError/Dan_dataset/train/{00001..00069}.tar"
-    TOTAL_SAMPLES_TO_CHECK = 128
+    TOTAL_SAMPLES_TO_CHECK = 128 * 32
     BATCH_SIZE = 16
     NUM_WORKERS = 8
 
