@@ -5,8 +5,9 @@ from datasets import load_dataset
 from torchvision import transforms
 from PIL import Image
 from collections import defaultdict
-import random
 
+import random
+import webdataset as wds
 class GradientDataset(Dataset):
     def __init__(
             self,
@@ -61,7 +62,8 @@ BUCKET_SIZES = [
 ]
 class TagImageIterableDataset(IterableDataset):
     def __init__(self, dataset_path, split="train", batch_size=16, name="", shuffle=True, repeat=True):
-        self.dataset = load_dataset(dataset_path, split=split)
+        self.dataset = wds.WebDataset(dataset_path).decode("pil").to_tuple("webp", "json")
+        self.dataset = self.dataset.shuffle(1000).repeat()
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.repeat = repeat
@@ -174,7 +176,7 @@ if __name__ == "__main__":
     # --- Configuration ---
     # !!! IMPORTANT: Replace this with your dataset path or HF repo ID !!!
     # I'm using a public dataset that matches your 'webp' and 'json' fields.
-    DATASET_PATH = "/root/ChatError/Dan_dataset"
+    DATASET_PATH = "/root/ChatError/Dan_dataset/train/{00000..00069}.tar"
 
     # We want 32 samples. Setting batch_size=32 will make the
     # first batch we get have (up to) 32 samples from one bucket.
