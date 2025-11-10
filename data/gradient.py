@@ -84,7 +84,7 @@ class TagImageIterableDataset(IterableDataset):
             wds.SimpleShardList(dataset_path),
             wds.split_by_worker,
             wds.tarfile_to_samples(),
-            wds.shuffle(10000),
+            wds.shuffle(1000),
             wds.decode("pil"),
             wds.to_tuple("webp", "json")
         )
@@ -179,9 +179,9 @@ if __name__ == "__main__":
 
     # --- Configuration ---
     DATASET_PATH = "/root/ChatError/Dan_dataset/train/{00001..00069}.tar"
-    TOTAL_SAMPLES_TO_CHECK = 128
+    TOTAL_SAMPLES_TO_CHECK = 256 * 128
     BATCH_SIZE = 256
-    NUM_WORKERS = 8
+    NUM_WORKERS = 32
 
     print(f"\nInitializing TagImageIterableDataset from: {DATASET_PATH}")
     print(f"Running check with {TOTAL_SAMPLES_TO_CHECK} samples, "
