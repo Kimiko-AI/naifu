@@ -163,14 +163,14 @@ class TagImageIterableDataset(IterableDataset):
             self,
             batch_size=None,  # Batching handled in __iter__
             pin_memory=True,
-            num_workers=16,
+            num_workers=8,
             **kwargs,
         )
 
 if __name__ == "__main__":
 
     DATASET_PATH = "/root/ChatError/Dan_dataset"
-    TEST_BATCH_SIZE = 256
+    TEST_BATCH_SIZE = 64
     NUM_BATCHES_TO_CHECK = 128
 
     print(f"Initializing dataset from: {DATASET_PATH}")
@@ -183,7 +183,7 @@ if __name__ == "__main__":
         repeat=False
     )
 
-    dataloader = DataLoader(dataset, batch_size=None, num_workers=16)
+    dataloader = DataLoader(dataset, batch_size=None, num_workers=8)
 
     all_prompts = []
     all_pixel_hashes = []
