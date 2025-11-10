@@ -88,10 +88,10 @@ class TagImageIterableDataset(IterableDataset):
             wds.decode("pil"),
             wds.to_tuple("webp", "json")
         )
-        if shuffle:
-            dataset = dataset.shuffle(1000)
-        if repeat:
-            dataset = dataset.repeat()
+        #if shuffle:
+        #    dataset = dataset.shuffle(1000)
+        #if repeat:
+        #    dataset = dataset.repeat()
 
         self.dataset = dataset
         self.buckets = BUCKET_SIZES
