@@ -170,7 +170,7 @@ class TagImageIterableDataset(IterableDataset):
 if __name__ == "__main__":
 
     DATASET_PATH = "/root/ChatError/Dan_dataset"
-    TEST_BATCH_SIZE = 256
+    TEST_BATCH_SIZE = 32
     NUM_BATCHES_TO_CHECK = 128
 
     print(f"Initializing dataset from: {DATASET_PATH}")
@@ -183,7 +183,7 @@ if __name__ == "__main__":
         repeat=False
     )
 
-    dataloader = DataLoader(dataset, batch_size=None, num_workers=32)
+    dataloader = DataLoader(dataset, batch_size=None, num_workers=0)
 
     all_prompts = []
     all_pixel_hashes = []
@@ -209,4 +209,21 @@ if __name__ == "__main__":
 
             print(f"Processed batch {batch_idx + 1}/{NUM_BATCHES_TO_CHECK}")
 
-        # Check
+        # Check duplicates for prompts
+        duplicate_prompts = set([p for p in all_prompts if all_prompts.count(p) > 1])
+        if duplicate_prompts:
+            print(f"\nFound {len(duplicate_prompts)} duplicate prompts across {len(all_prompts)} samples:")
+            for dp in duplicate_prompts:
+                print(f"    {dp}")
+        else:
+            print("\nNo duplicate prompts found across batches.")
+
+        # Check duplicates for images
+        duplicate_hashes = set([h for h in all_pixel_hashes if all_pixel_hashes.count(h) > 1])
+        if duplicate_hashes:
+            print(f"Found {len(duplicate_hashes)} duplicate images across {len(all_pixel_hashes)} samples.")
+        else:
+            print("No duplicate images found across batches.")
+
+    except Exception as e:
+        print(f"An error occurred while loading the dataset: {e}")
