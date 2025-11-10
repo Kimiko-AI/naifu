@@ -172,7 +172,7 @@ if __name__ == "__main__":
     # --- Configuration ---
     # !!! IMPORTANT: Replace this with your dataset path or HF repo ID !!!
     # I'm using a public dataset that matches your 'webp' and 'json' fields.
-    DATASET_PATH = "/root/ChatError/Dan_dataset/train/{00000..00069}.tar"
+    DATASET_PATH = "/root/ChatError/Dan_dataset/train/{00001..00069}.tar"
 
     # We want 32 samples. Setting batch_size=32 will make the
     # first batch we get have (up to) 32 samples from one bucket.

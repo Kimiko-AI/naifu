@@ -38,7 +38,7 @@ model:
 dataset:
   name: "data.gradient.TagImageIterableDataset"
  # image_size: 256
-  dataset_path: "/root/ChatError/Dan_dataset/train/{00000..00069}.tar"
+  dataset_path: "/root/ChatError/Dan_dataset/train/{00001..00069}.tar"
   batch_size: 64
 
 optimizer:
