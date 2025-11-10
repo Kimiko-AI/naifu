@@ -164,6 +164,7 @@ class TagImageIterableDataset(IterableDataset):
             batch_size=None,  # Batching handled in __iter__
             pin_memory=True,
             num_workers=8,
+            prefetch_factor = 16,
             **kwargs,
         )
 
@@ -183,7 +184,7 @@ if __name__ == "__main__":
         repeat=False
     )
 
-    dataloader = DataLoader(dataset, batch_size=None, num_workers=8)
+    dataloader = DataLoader(dataset, batch_size=None, num_workers=8, prefetch_factor = 16,)
 
     all_prompts = []
     all_pixel_hashes = []
