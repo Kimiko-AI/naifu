@@ -5,9 +5,7 @@ from datasets import load_dataset
 from torchvision import transforms
 from PIL import Image
 from collections import defaultdict
-
 import random
-import webdataset as wds
 class GradientDataset(Dataset):
     def __init__(
             self,
@@ -60,178 +58,155 @@ BUCKET_SIZES = [
     (320, 192),
     (192, 320),
 ]
-
 class TagImageIterableDataset(IterableDataset):
     def __init__(self, dataset_path, split="train", batch_size=16, name="", shuffle=True, repeat=True):
-        """
-        Iterable dataset for WebDataset archives of (image, JSON metadata) pairs.
-
-        Args:
-            dataset_path: Path or URL to WebDataset shards (e.g. "data/{00000..00010}.tar").
-            split: Dataset split name, unused but included for compatibility.
-            batch_size: Number of samples per bucket batch.
-            name: Optional dataset name.
-            shuffle: Whether to shuffle the stream (buffered).
-            repeat: Whether to repeat endlessly.
-        """
+        self.dataset = load_dataset(dataset_path, split=split)
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.repeat = repeat
-        self.name = name
 
-        # Set up WebDataset pipeline
-        dataset = wds.DataPipeline(
-            wds.SimpleShardList(dataset_path),
-            wds.split_by_worker,
-            wds.tarfile_to_samples(),
-            wds.shuffle(1000),
-            wds.decode("pil"),
-            wds.to_tuple("webp", "json")
-        )
-        #if shuffle:
-        #    dataset = dataset.shuffle(1000)
-        #if repeat:
-        #    dataset = dataset.repeat()
-
-        self.dataset = dataset
         self.buckets = BUCKET_SIZES
         self.bucket_ratios = [w / h for w, h in self.buckets]
+        self.base_transform = transforms.Compose([transforms.ToTensor()])
 
-        self.base_transform = transforms.Compose([
-            transforms.ToTensor(),
-        ])
+        self.is_streaming = getattr(self.dataset, "is_streaming", False)
 
     def assign_bucket(self, width, height):
-        """Find which bucket an image belongs to based on aspect ratio."""
         ratio = width / height
         return min(range(len(self.bucket_ratios)),
                    key=lambda i: abs(self.bucket_ratios[i] - ratio))
 
     def resize_to_bucket(self, image, bucket_idx):
-        """Resize image to target bucket resolution."""
         target_w, target_h = self.buckets[bucket_idx]
         return image.resize((target_w, target_h), Image.BICUBIC)
 
     def preprocess_sample(self, sample):
-        """Convert WebDataset sample (image, JSON) into usable tensors and text."""
-        image, json_data = sample  # because we used .to_tuple("webp", "json")
-        if not isinstance(image, Image.Image):
-            image = Image.open(image).convert("RGB")
-
+        json_data = sample["json"]
         rating = json_data.get("rating", [])
         character_tags = json_data.get("character_tags", [])
         general_tags = json_data.get("general_tags", [])
         all_tags = rating + character_tags + general_tags
         tag_str = " ".join(map(str, all_tags))[:512]
 
+        image = sample["webp"]
+        if not isinstance(image, Image.Image):
+            image = Image.open(image).convert("RGB")
         return image, tag_str
 
+    def get_sample_indices(self):
+        """Generate the sequence of indices this worker should handle."""
+        worker_info = get_worker_info()
+        dataset_len = len(self.dataset)
+
+        if worker_info is None:
+            # Single-process loading
+            start, end = 0, dataset_len
+        else:
+            # Split dataset across workers
+            per_worker = dataset_len // worker_info.num_workers
+            start = worker_info.id * per_worker
+            # Last worker takes the remainder
+            end = dataset_len if worker_info.id == worker_info.num_workers - 1 else start + per_worker
+
+        indices = list(range(start, end))
+        if self.shuffle:
+            random.shuffle(indices)
+        return indices
+
     def _make_iter(self):
-        """Return an iterator over the (possibly shuffled) WebDataset."""
-        return iter(self.dataset)
+        """Return a fresh iterator over samples (shuffled if needed)."""
+        if self.is_streaming:
+            if self.shuffle:
+                return iter(self.dataset.shuffle(buffer_size=1000, seed=random.randint(0, 1e6)))
+            else:
+                return iter(self.dataset)
+        else:
+            indices = list(range(len(self.dataset)))
+            if self.shuffle:
+                random.shuffle(indices)
+            return (self.dataset[i] for i in indices)
 
     def __iter__(self):
-        """Main iteration: bucketed batching from WebDataset stream."""
         bucket_batches = [[] for _ in self.buckets]
-        dataset_iter = self._make_iter()
 
-        for sample in dataset_iter:
-            try:
-                image, tag_str = self.preprocess_sample(sample)
-                w, h = image.size
-                bucket_idx = self.assign_bucket(w, h)
-                image = self.resize_to_bucket(image, bucket_idx)
-                image_tensor = self.base_transform(image)
+        while True:
+            dataset_iter = self._make_iter()
 
-                bucket_batches[bucket_idx].append({
-                    "pixels": image_tensor,
-                    "prompts": tag_str
-                })
+            for sample in dataset_iter:
+                try:
+                    image, tag_str = self.preprocess_sample(sample)
+                    w, h = image.size
+                    bucket_idx = self.assign_bucket(w, h)
+                    image = self.resize_to_bucket(image, bucket_idx)
+                    image_tensor = self.base_transform(image)
 
-                # yield a batch when one bucket fills
-                if len(bucket_batches[bucket_idx]) >= self.batch_size:
-                    batch = bucket_batches[bucket_idx]
-                    pixels = torch.stack([x["pixels"] for x in batch])
-                    prompts = [x["prompts"] for x in batch]
-                    yield {"pixels": pixels, "prompts": prompts}
-                    bucket_batches[bucket_idx] = []
-            except Exception as e:
-                print(f"Skipping sample due to error: {e}")
-                continue
+                    bucket_batches[bucket_idx].append({
+                        "pixels": image_tensor,
+                        "prompts": tag_str
+                    })
 
-        # no repeat → stop after one full pass
-        if not self.repeat:
-            return
+                    if len(bucket_batches[bucket_idx]) >= self.batch_size:
+                        batch = bucket_batches[bucket_idx]
+                        pixels = torch.stack([x["pixels"] for x in batch])
+                        prompts = [x["prompts"] for x in batch]
+                        yield {"pixels": pixels, "prompts": prompts}
+                        bucket_batches[bucket_idx] = []
+                except Exception as e:
+                    print(f"Skipping sample due to error: {e}")
+                    continue
+
+            if not self.repeat:
+                break
 
     def init_dataloader(self, **kwargs):
-        """Return a DataLoader wrapping this iterable dataset."""
         return DataLoader(
             self,
-            batch_size=None,  # batching handled internally
+            batch_size=None,  # Batching handled in __iter__
             pin_memory=True,
-            num_workers=8,
+            num_workers=32,
             **kwargs,
         )
 
 if __name__ == "__main__":
-    import torch
-    from torch.utils.data import get_worker_info
 
-    # --- Configuration ---
-    DATASET_PATH = "/root/ChatError/Dan_dataset/train/{00001..00069}.tar"
-    TOTAL_SAMPLES_TO_CHECK = 256 * 128
-    BATCH_SIZE = 256
-    NUM_WORKERS = 32
+    DATASET_PATH = "/root/ChatError/Dan_dataset"
+    TEST_BATCH_SIZE = 256
+    NUM_BATCHES_TO_CHECK = 128
 
-    print(f"\nInitializing TagImageIterableDataset from: {DATASET_PATH}")
-    print(f"Running check with {TOTAL_SAMPLES_TO_CHECK} samples, "
-          f"batch_size={BATCH_SIZE}, num_workers={NUM_WORKERS}\n")
+    print(f"Initializing dataset from: {DATASET_PATH}")
 
     dataset = TagImageIterableDataset(
         dataset_path=DATASET_PATH,
         split="train",
-        batch_size=BATCH_SIZE,
+        batch_size=TEST_BATCH_SIZE,
         shuffle=False,
-        repeat=False,
+        repeat=False
     )
 
-    dataloader = DataLoader(
-        dataset,
-        batch_size=None,   # dataset handles batching
-        num_workers=NUM_WORKERS,
-        pin_memory=True,
-    )
+    dataloader = DataLoader(dataset, batch_size=None, num_workers=32)
 
-    seen_prompts = set()
-    worker_seen = {}
+    all_prompts = []
+    all_pixel_hashes = []
+    import hashlib
 
-    total_samples = 0
-    for batch_idx, batch in enumerate(dataloader):
-        prompts = batch["prompts"]
-        total_samples += len(prompts)
+    def tensor_hash(tensor):
+        return hashlib.md5(tensor.numpy().tobytes()).hexdigest()
 
-        # Detect which worker produced this batch
-        worker_info = get_worker_info()
-        wid = worker_info.id if worker_info else -1
+    try:
+        batch_iter = iter(dataloader)
+        for batch_idx in range(NUM_BATCHES_TO_CHECK):
+            try:
+                batch = next(batch_iter)
+            except StopIteration:
+                print(f"Reached end of dataset at batch {batch_idx}.")
+                break
 
-        for p in prompts:
-            worker_seen.setdefault(wid, []).append(p)
-            if p in seen_prompts:
-                print(f"⚠️ Duplicate prompt found in batch {batch_idx}: {p[:60]}...")
-            seen_prompts.add(p)
+            prompts = batch["prompts"]
+            pixels = batch["pixels"]
 
-        print(f"Batch {batch_idx:03d}: {len(prompts)} samples "
-              f"(total so far: {total_samples})")
+            all_prompts.extend(prompts)
+            all_pixel_hashes.extend([tensor_hash(p) for p in pixels])
 
-        if total_samples >= TOTAL_SAMPLES_TO_CHECK:
-            break
+            print(f"Processed batch {batch_idx + 1}/{NUM_BATCHES_TO_CHECK}")
 
-    print("\n--- Summary ---")
-    print(f"Total unique prompts: {len(seen_prompts)}")
-    print(f"Total processed: {total_samples}")
-    print(f"Duplicates found: {total_samples - len(seen_prompts)}")
-
-    for wid, samples in worker_seen.items():
-        print(f"Worker {wid} handled {len(samples)} samples")
-
-    print("\n✅ Test complete.")
+        # Check
