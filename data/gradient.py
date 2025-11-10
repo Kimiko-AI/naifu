@@ -114,49 +114,47 @@ class TagImageIterableDataset(IterableDataset):
         return indices
 
     def _make_iter(self):
-        """Return a fresh iterator over samples (shuffled if needed)."""
+        worker_info = get_worker_info()
         if self.is_streaming:
+            # Streaming dataset: shuffle via Hugging Face streaming API
             if self.shuffle:
-                return iter(self.dataset.shuffle(buffer_size=1000, seed=random.randint(0, 1e6)))
-            else:
-                return iter(self.dataset)
+                return iter(self.dataset.shuffle(buffer_size=1000, seed=random.randint(0, 1_000_000)))
+            return iter(self.dataset)
         else:
-            indices = list(range(len(self.dataset)))
-            if self.shuffle:
-                random.shuffle(indices)
+            # Standard dataset: split indices for workers
+            indices = self.get_sample_indices()
             return (self.dataset[i] for i in indices)
 
     def __iter__(self):
         bucket_batches = [[] for _ in self.buckets]
+        dataset_iter = self._make_iter()  # <- make iterator once per epoch
 
-        while True:
-            dataset_iter = self._make_iter()
+        for sample in dataset_iter:
+            try:
+                image, tag_str = self.preprocess_sample(sample)
+                w, h = image.size
+                bucket_idx = self.assign_bucket(w, h)
+                image = self.resize_to_bucket(image, bucket_idx)
+                image_tensor = self.base_transform(image)
 
-            for sample in dataset_iter:
-                try:
-                    image, tag_str = self.preprocess_sample(sample)
-                    w, h = image.size
-                    bucket_idx = self.assign_bucket(w, h)
-                    image = self.resize_to_bucket(image, bucket_idx)
-                    image_tensor = self.base_transform(image)
+                bucket_batches[bucket_idx].append({
+                    "pixels": image_tensor,
+                    "prompts": tag_str
+                })
 
-                    bucket_batches[bucket_idx].append({
-                        "pixels": image_tensor,
-                        "prompts": tag_str
-                    })
+                if len(bucket_batches[bucket_idx]) >= self.batch_size:
+                    batch = bucket_batches[bucket_idx]
+                    pixels = torch.stack([x["pixels"] for x in batch])
+                    prompts = [x["prompts"] for x in batch]
+                    yield {"pixels": pixels, "prompts": prompts}
+                    bucket_batches[bucket_idx] = []
+            except Exception as e:
+                print(f"Skipping sample due to error: {e}")
+                continue
 
-                    if len(bucket_batches[bucket_idx]) >= self.batch_size:
-                        batch = bucket_batches[bucket_idx]
-                        pixels = torch.stack([x["pixels"] for x in batch])
-                        prompts = [x["prompts"] for x in batch]
-                        yield {"pixels": pixels, "prompts": prompts}
-                        bucket_batches[bucket_idx] = []
-                except Exception as e:
-                    print(f"Skipping sample due to error: {e}")
-                    continue
-
-            if not self.repeat:
-                break
+        if self.repeat:
+            # Only recurse/loop if repeating is needed
+            yield from self.__iter__()
 
     def init_dataloader(self, **kwargs):
         return DataLoader(
