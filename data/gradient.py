@@ -161,7 +161,7 @@ class TagImageIterableDataset(IterableDataset):
             self,
             batch_size=None,  # Batching handled in __iter__
             pin_memory=True,
-            num_workers=0,
+            num_workers=16,
             **kwargs,
         )
 
